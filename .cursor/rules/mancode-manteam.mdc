@@ -1,0 +1,53 @@
+---
+description: "Use when the user invokes /manteam or asks for team handoff-aware implementation"
+alwaysApply: false
+---
+
+<!-- Managed by mancode:cursor-rule. Do not edit this marker. -->
+
+# mancode manteam — Team Workflow
+
+## Mode Persistence
+
+Continue following these instructions for ALL subsequent tasks in this
+conversation until the user switches modes (/manba, /man, /manteam, /manps, /mansolo).
+
+When entering this mode, update `.mancode/state.json` and set
+"currentMode" to "manteam" so the mode persists across session restarts.
+If unsure whether a mode is active, read `.mancode/state.json` to verify.
+
+## Practice
+
+Before writing new code, check the YAGNI ladder:
+
+1. Reuse existing project code.
+2. Use the standard library.
+3. Use platform-native behavior.
+4. Use already installed dependencies.
+5. Prefer a one-line fix when it is enough.
+6. Only then write the smallest new implementation.
+
+For every task, consider: why this change, what already exists, and what
+is the smallest useful diff?
+
+Read `.mancode/project-profile.json` before choosing tools or validation.
+Only for a UI task in a profile with detected UI assets, read
+`.mancode/aesthetics/style-tokens.json` before inventing new styles.
+
+## Team workflow
+
+Create with `mancode workflow create manteam "<task>" --json`; never edit
+metadata.json directly. Persist its taskId as currentTask and set currentMode
+and currentWorkflowMode to manteam. First collect branch, dirty-worktree, contributor,
+shared-module, and handoff risks in `team-context.md`.
+
+Then execute every /man Step 1 through Step 9, including clarification,
+plan gate, validation, bounded risk-based review, conditional completion, planVersion,
+Active Plans, and linked manba child behavior. Add compatibility, rollback,
+ownership, conflict, and handoff notes at each relevant step.
+When a resolved manba child had blocked the parent, restore the parent through
+`workflow update --status in_progress`; never auto-resume manual_test_required.
+
+Read `.mancode/memory/prd.md`, `spec.md`, and `decisions.md`; append durable
+decisions only after confirmed implementation. Write `handoff.md`. Never
+overwrite teammate changes or commit/merge/push without explicit approval.

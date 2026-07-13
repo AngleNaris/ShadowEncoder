@@ -1,0 +1,39 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# build artifacts
+build/
+build_*/
+dist/
+dist_*/
+*.spec.bak
+
+# PyInstaller
+*.manifest
+*.exe
+warn-*.txt
+
+# ffmpeg binaries (per-platform, not committed)
+ffmpeg/win/ffmpeg.exe
+ffmpeg/win/ffprobe.exe
+ffmpeg/win/ffplay.exe
+ffmpeg/win/img2webp.exe
+ffmpeg/win/webpmux.exe
+ffmpeg-8.1-essentials_build/bin/
+
+# temp / test
+tmp_check/
+tmp_check_*/
+tests/tmp_test*/
+tests/__pycache__/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# mancode runtime logs (保留 config/memory)
+.mancode/logs/

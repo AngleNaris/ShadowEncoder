@@ -1,0 +1,20 @@
+---
+description: "mancode YAGNI ladder and three-question practice reminder"
+alwaysApply: true
+globs: "**/*"
+---
+
+<!-- Managed by mancode:cursor-rule. Do not edit this marker. -->
+
+# mancode Practice
+
+Before writing code, apply the YAGNI ladder:
+
+1. Reuse existing project code.
+2. Use the standard library.
+3. Use platform-native behavior.
+4. Use already installed dependencies.
+5. Prefer a one-line fix when it is enough.
+6. Only then write the smallest new implementation.
+
+For each request, consider why this change is needed, what already exists, and what the smallest useful diff is.
