@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import ctypes
 import os
-import sys
 import threading
 import time
 import traceback
@@ -15,54 +13,16 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 import alpha_video_backend as backend
 from alpha_video_config import (
-    APP_NAME, APP_VERSION, APP_AUTHOR, DARK_QSS,
     MEDIA_EXTENSIONS, SUPPORTED_INPUT_MEDIA,
     get_video_info, format_time, parse_time, normalize_path,
     OperationCancelledError, get_ffmpeg_bin,
 )
 from alpha_video_player import CropOverlay
 from alpha_video_player2 import CvPlayer
-
-
-# ── 工具函数 ────────────────────────────────────────────────
-
-def resource_dir() -> Path:
-    if getattr(sys, '_MEIPASS', None):
-        return Path(sys._MEIPASS)
-    return Path(__file__).resolve().parent
-
-
-def resource_path(name: str) -> Path:
-    return resource_dir() / name
-
-
-def load_svg_icon() -> QtGui.QIcon:
-    icon_path = resource_path('icon.svg')
-    if not icon_path.exists():
-        return QtGui.QIcon()
-    renderer = QtSvg.QSvgRenderer(str(icon_path))
-    icon = QtGui.QIcon()
-    for size in (16, 24, 32, 48, 64, 128, 256):
-        pixmap = QtGui.QPixmap(size, size)
-        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
-        painter = QtGui.QPainter(pixmap)
-        renderer.render(painter)
-        painter.end()
-        icon.addPixmap(pixmap)
-    return icon
-
-
-def apply_windows_app_id() -> None:
-    if sys.platform != 'win32':
-        return
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_NAME)
-    except Exception:
-        pass
 
 
 def configure_combo_box(combo: QtWidgets.QComboBox, minimum_contents: int = 16) -> None:
@@ -76,31 +36,6 @@ def configure_combo_box(combo: QtWidgets.QComboBox, minimum_contents: int = 16) 
 
 
 # ── 组件 ────────────────────────────────────────────────────
-
-class StatusBadge(QtWidgets.QLabel):
-    COLORS = {
-        'idle': ('#9e90a8', 'transparent', '#49454f'),
-        'running': ('#e6e0e9', 'transparent', '#4f378b'),
-        'success': ('#e6e0e9', 'transparent', '#49454f'),
-        'warning': ('#e6e0e9', 'transparent', '#49454f'),
-        'error': ('#e6e0e9', 'transparent', '#49454f'),
-    }
-
-    def __init__(self, text: str = '空闲', tone: str = 'idle', parent=None) -> None:
-        super().__init__(text, parent)
-        self.setAlignment(QtCore.Qt.AlignCenter)
-        self.setMinimumWidth(90)
-        self.setMinimumHeight(30)
-        self.set_state(text, tone)
-
-    def set_state(self, text: str, tone: str) -> None:
-        fg, bg, border = self.COLORS.get(tone, self.COLORS['idle'])
-        self.setText(text)
-        self.setStyleSheet(
-            f'color:{fg}; background:{bg}; border:1px solid {border}; '
-            f'padding:4px 10px; font-weight:600;'
-        )
-
 
 class ActivityLog(QtWidgets.QTextEdit):
     def __init__(self, parent=None) -> None:
@@ -356,6 +291,14 @@ class AlphaTab(QtWidgets.QWidget):
         info_layout.addWidget(hint)
         left_layout.addWidget(info)
 
+        # 奇数高度警告
+        self._warn_label = QtWidgets.QLabel('')
+        self._warn_label.setObjectName('DetailLabel')
+        self._warn_label.setStyleSheet('color: #e8b84b;')
+        self._warn_label.setWordWrap(True)
+        self._warn_label.hide()
+        left_layout.addWidget(self._warn_label)
+
         left_layout.addStretch(1)
 
         # 操作按钮
@@ -406,6 +349,15 @@ class AlphaTab(QtWidgets.QWidget):
         info = get_video_info(path)
         if info:
             self._player.load_video(path)
+            # 奇数高度警告（合成会忽略最底 1 行）
+            if info.get('height', 0) % 2 != 0:
+                self._warn_label.setText(
+                    f'⚠ 视频高度为奇数({info["height"]}px)，合成时将忽略最底部 1 行，'
+                    f'建议导出前裁剪为偶数高度。'
+                )
+                self._warn_label.show()
+            else:
+                self._warn_label.hide()
 
     def _clear_input(self) -> None:
         self._input_edit.clear()
@@ -1264,62 +1216,3 @@ class ClipTab(_ExportTabBase):
             QtWidgets.QMessageBox.information(self, '完成', '视频片段已导出!')
 
 
-# ── 主窗口 ──────────────────────────────────────────────────
-
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowTitle(f'{APP_NAME} v{APP_VERSION}')
-        self.setMinimumSize(1200, 760)
-        self.resize(1360, 820)
-
-        icon = load_svg_icon()
-        if not icon.isNull():
-            self.setWindowIcon(icon)
-
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        main_layout = QtWidgets.QVBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        self._tabs = QtWidgets.QTabWidget()
-        self._tabs.setDocumentMode(True)
-
-        self._alpha_tab = AlphaTab()
-        self._screenshot_tab = ScreenshotTab()
-        self._gif_tab = GifTab()
-        self._webp_tab = WebpTab()
-        self._clip_tab = ClipTab()
-
-        self._tabs.addTab(self._alpha_tab, '  合成透明通道  ')
-        self._tabs.addTab(self._screenshot_tab, '  截图  ')
-        self._tabs.addTab(self._clip_tab, '  截取视频  ')
-        self._tabs.addTab(self._gif_tab, '  导出GIF  ')
-        self._tabs.addTab(self._webp_tab, '  导出WebP  ')
-
-        main_layout.addWidget(self._tabs)
-
-        # 状态栏
-        status = self.statusBar()
-        status_label = QtWidgets.QLabel('就绪')
-        status.addWidget(status_label)
-        status.addPermanentWidget(QtWidgets.QLabel(APP_AUTHOR))
-
-
-# ── 入口 ────────────────────────────────────────────────────
-
-def main() -> None:
-    apply_windows_app_id()
-
-    app = QtWidgets.QApplication(sys.argv)
-    app.setStyleSheet(DARK_QSS)
-
-    window = MainWindow()
-    window.show()
-
-    sys.exit(app.exec())
-
-
-if __name__ == '__main__':
-    main()

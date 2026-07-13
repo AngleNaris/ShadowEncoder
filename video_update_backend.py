@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,7 +32,21 @@ class UpdateInfo:
 
 
 def _version_tuple(v: str) -> tuple[int, ...]:
-    return tuple(int(x) for x in v.strip().split("."))
+    """将版本号解析为可比较的整数元组。
+
+    容错规则：
+    - 去除首尾空白与可选的 'v' 前缀（如 'v1.2.3' → '1.2.3'）
+    - 对非数字段（如 dev / beta / rc，或 '1.0.0-beta' 这类带后缀的段）：
+      提取前导数字部分参与比较，无数字时按 0 处理，避免崩溃。
+    """
+    v = v.strip()
+    if v[:1].lower() == 'v':
+        v = v[1:]
+    result = []
+    for part in v.split('.'):
+        m = re.match(r'\d+', part)
+        result.append(int(m.group(0)) if m else 0)
+    return tuple(result)
 
 
 def is_newer(remote: str, local: str) -> bool:

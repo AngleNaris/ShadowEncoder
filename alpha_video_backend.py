@@ -108,11 +108,16 @@ def compose_alpha(input_path: str, output_path: str, fps: float | None,
 
     full_h = info['height']
     rgb_h = full_h // 2  # 上半 RGB
-    alpha_h = full_h - rgb_h  # 下半 Alpha
+    alpha_h = rgb_h      # 下半 Alpha：与 RGB 同高，保证 alphamerge 两路严格同尺寸
 
     logger.print(f'输入视频: {input_path}')
     logger.print(f'原始尺寸: {info["width"]}x{info["height"]}')
-    logger.print(f'RGB 区域: 0～{rgb_h}px, Alpha 区域: {rgb_h}～{full_h}px')
+    if full_h % 2 != 0:
+        logger.print(
+            f'注意: 视频高度为奇数({full_h}px)，已取上半/下半各 {rgb_h}px，'
+            f'最底部 1 行将被忽略以保证透明通道合成正确。'
+        )
+    logger.print(f'RGB 区域: 0～{rgb_h}px, Alpha 区域: {rgb_h}～{rgb_h + alpha_h}px')
     logger.print(f'输出帧率: {fps or "原始"}')
     logger.print('')
 
@@ -310,7 +315,7 @@ def export_webp(input_path: str, output_path: str,
         '-ss', str(start_time),
         '-t', str(duration),
         '-pix_fmt', 'rgba',
-        '-vsync', '1',
+        '-fps_mode', 'cfr',
     ]
     if vf_filters:
         extract_cmd.extend(['-vf', ','.join(vf_filters)])
