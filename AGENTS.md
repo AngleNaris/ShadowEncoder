@@ -89,3 +89,16 @@ In solo mode, use the narrowest meaningful validation and one bounded self-check
 - Session and prompt-submit hooks are represented as persistent instructions.
 - Simulate the coaching staff in sequence inside the same conversation: Scout, Plan Coach, Head Coach, Film Analyst Offense, Film Analyst Defense.
 <!-- mancode:zcode:end -->
+
+# ShadowEncoder Project Rules
+
+## Default validation (UI / frontend)
+
+After any UI or frontend change that can be seen in the running app:
+
+1. Prefer **starting the app** and doing a visual/smoke check over only `tsc` / unit checks.
+2. Start command (from repo): `app\dev-tauri.bat`  
+   - Sets MSVC env, Cargo PATH, ffmpeg PATH, then `npm run tauri dev` in `app/`.
+3. If a Tauri/Vite dev process is already running, reuse it; only restart when native/backend code or deps changed.
+4. Report what you launched and what you checked (layout, tabs, shared file list, progress, etc.).
+5. Typecheck (`cd app && npx tsc --noEmit`) is secondary; do not treat it as a substitute for launching the app when UI changed.

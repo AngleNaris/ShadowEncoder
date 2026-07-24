@@ -1,0 +1,19 @@
+# Dependencies
+node_modules
+.npmcache
+
+# Build output
+dist
+dist-*
+
+# Tauri (Rust)
+src-tauri/target
+src-tauri/gen
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db

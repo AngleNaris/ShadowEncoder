@@ -37,3 +37,20 @@ tests/__pycache__/
 
 # mancode runtime logs (保留 config/memory)
 .mancode/logs/
+
+# AI tooling runtime state (非项目源码，不入库)
+.workbuddy/
+.mancode/
+.claude/
+.cursor/
+.playwright-mcp/
+
+# 验证用截图（非交付物）
+shadowencoder-*.png
+
+# 一次性安装器
+rustup-init.exe
+
+# 临时/日志文件
+app/err.txt
+*.timestamp-*.mjs
