@@ -44,6 +44,8 @@ tests/__pycache__/
 .claude/
 .cursor/
 .playwright-mcp/
+.agents/
+.github/
 
 # 验证用截图（非交付物）
 shadowencoder-*.png
