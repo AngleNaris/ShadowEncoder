@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "externalBin": [
+      "binaries/shadowencoder-cli"
+    ],
+    "resources": {
+      "../../mpv/win/64/libmpv-2.dll": "libmpv-2.dll",
+      "../../ffmpeg/win/ffmpeg.exe": "ffmpeg.exe",
+      "../../ffmpeg/win/ffprobe.exe": "ffprobe.exe"
+    }
+  }
+}

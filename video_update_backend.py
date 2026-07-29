@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 UPDATE_URL = "https://cdn.3efs.com/xtools/shadowencoder/version.json"
 

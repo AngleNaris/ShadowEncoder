@@ -131,6 +131,24 @@ export function IconCropClear({ size, className }: IconProps) {
   );
 }
 
+export function IconLock({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <rect x="5" y="10" width="14" height="11" />
+      <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+    </Svg>
+  );
+}
+
+export function IconUnlock({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <rect x="5" y="10" width="14" height="11" />
+      <path d="M8 10V7a4 4 0 0 1 7.5-2" />
+    </Svg>
+  );
+}
+
 /* ── 功能导航图标（20px 使用，直角硬朗） ───────────────────── */
 
 /** 转码：双向交换箭头 */

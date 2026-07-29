@@ -1,60 +1,79 @@
 // ShadowEncoder 8 个功能标签页 —— 共享素材列表 + 处理选中 / 批量处理
-import React, { useRef, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, ReactNode } from 'react';
 import * as ui from './ui';
 import { ResizeHandle } from './ResizeHandle';
 import VideoPlayer, { VideoPlayerHandle, CropRectResult } from './VideoPlayer';
 import {
-  getVideoInfo, composeAlpha, screenshotFrame, exportGif, exportWebp, exportSegment,
-  transcode, mixAudio, checkVideos, subscribeProgress, subscribeLog, mediaPreviewUrl,
-  formatTime, parseTime,
-  type VideoInfo, type CropRect,
+  getVideoInfo, remapCrop, composeAlpha, screenshotFrame, exportGif, exportWebp, exportSegment,
+  transcode, mixAudio, checkVideos, subscribeProgress, subscribeLog, mediaPreviewUrl, cancelFfmpeg,
+  formatTime, parseTime, openOutputDirectory,
+  normalizeTaskLogEvent,
+  type VideoInfo, type CropRect, type MediaDimensions, type GifCompression, type TaskLogEvent,
 } from '../lib/ffmpeg';
-import { PresetManager, PresetManageDialog, usePresets, type PresetBuilderCtx, CROP_ASPECT_OPTIONS, aspectToRatio, parseCustomRatioParts, linkAspectHeight, linkAspectWidth } from './presetSystem';
+import { PresetManager, PresetManageDialog, usePresets, type Preset, type PresetBuilderCtx, CROP_ASPECT_OPTIONS, GIF_COMPRESSION_OPTIONS, aspectToRatio, parseCustomRatioParts, linkAspectHeight, linkAspectWidth } from './presetSystem';
+import {
+  DEFAULT_OUTPUT_FORM,
+  DEFAULT_ENCODE_NAME_TEMPLATE,
+  OutputLocationFields,
+  OutputLocationGroup,
+  buildEncodeNameLabels,
+  describeOutputSettings,
+  normalizeOutputForm,
+  toOutputSettings,
+  type OutputFormState,
+} from './OutputSettings';
+import { DEFAULT_EXPORT_DIMENSIONS, dimensionsForCropAspect } from '../lib/outputDimensions';
+import { isPresetUiFieldDisabled } from '../lib/presetUiRules';
+import {
+  registerAgentTaskHandler,
+  type AgentTaskExecutionResult,
+  type TaskRunOutcome,
+} from '../lib/agentTaskBridge';
 
 // 预设构建器 —— 流程图式一次性展示可配置项
 // 设计参考 Shutter Encoder 的"函数 = 输出格式"（高自由度），但改用分组卡片避免其信息过载；
 // 每个视频/音频编码器都带兼容性约束（封装白名单）与编码器专属"规格/Profile"（如 ProRes 的 Proxy/422HQ/4444）。
 const CONTAINER_OPTIONS = [
-  { label: 'MP4 (mp4)', value: 'mp4' },
-  { label: 'MKV (mkv)', value: 'mkv' },
-  { label: 'MOV (QuickTime, mov)', value: 'mov' },
-  { label: 'WebM (webm)', value: 'webm' },
-  { label: 'AVI (avi)', value: 'avi' },
-  { label: 'FLV (flv)', value: 'flv' },
-  { label: 'MPEG-TS (ts)', value: 'ts' },
-  { label: 'MPEG-PS (mpeg)', value: 'mpeg' },
-  { label: 'WMV (wmv)', value: 'wmv' },
-  { label: 'OGV (ogv)', value: 'ogv' },
-  { label: '3GP (3gp)', value: '3gp' },
-  { label: 'ASF (asf)', value: 'asf' },
-  { label: 'M4V (m4v)', value: 'm4v' },
-  { label: 'GIF (gif)', value: 'gif' },
+  { label: 'MP4', value: 'mp4' },
+  { label: 'MKV', value: 'mkv' },
+  { label: 'MOV', value: 'mov', tags: ['QuickTime'] },
+  { label: 'WebM', value: 'webm' },
+  { label: 'AVI', value: 'avi' },
+  { label: 'FLV', value: 'flv' },
+  { label: 'MPEG-TS', value: 'ts' },
+  { label: 'MPEG-PS', value: 'mpeg' },
+  { label: 'WMV', value: 'wmv' },
+  { label: 'OGV', value: 'ogv' },
+  { label: '3GP', value: '3gp' },
+  { label: 'ASF', value: 'asf' },
+  { label: 'M4V', value: 'm4v' },
+  { label: 'GIF', value: 'gif' },
 ];
 
 const VIDEO_CODEC_OPTIONS = [
-  { label: '复制视频流 · copy（仅换封装 / 改音频）', value: 'copy' },
-  { label: 'H.264 · libx264', value: 'libx264' },
-  { label: 'H.265/HEVC · libx265', value: 'libx265' },
-  { label: 'H.264 · h264_nvenc (NVIDIA)', value: 'h264_nvenc' },
-  { label: 'H.265/HEVC · hevc_nvenc (NVIDIA)', value: 'hevc_nvenc' },
-  { label: 'H.264 · h264_amf (AMD)', value: 'h264_amf' },
-  { label: 'H.265/HEVC · hevc_amf (AMD)', value: 'hevc_amf' },
-  { label: 'H.264 · h264_qsv (Intel)', value: 'h264_qsv' },
-  { label: 'H.265/HEVC · hevc_qsv (Intel)', value: 'hevc_qsv' },
-  { label: 'AV1 · libsvtav1', value: 'libsvtav1' },
-  { label: 'AV1 · libaom-av1', value: 'libaom-av1' },
-  { label: 'AV1 · av1_nvenc (NVIDIA)', value: 'av1_nvenc' },
-  { label: 'AV1 · av1_amf (AMD)', value: 'av1_amf' },
-  { label: 'AV1 · av1_qsv (Intel)', value: 'av1_qsv' },
-  { label: 'VP8 · libvpx', value: 'libvpx' },
-  { label: 'VP9 · libvpx-vp9', value: 'libvpx-vp9' },
-  { label: 'MPEG-4 Part2 · mpeg4', value: 'mpeg4' },
-  { label: 'MPEG-2 · mpeg2video', value: 'mpeg2video' },
-  { label: 'Apple ProRes · prores', value: 'prores' },
-  { label: 'Avid DNxHR · dnxhd', value: 'dnxhd' },
-  { label: 'JPEG · mjpeg', value: 'mjpeg' },
-  { label: '无损 · ffv1', value: 'ffv1' },
-  { label: 'GIF (动图)', value: 'gif' },
+  { label: '复制视频流', value: 'copy', tags: ['copy'] },
+  { label: 'H.264', value: 'libx264', tags: ['libx264'] },
+  { label: 'H.265/HEVC', value: 'libx265', tags: ['libx265'] },
+  { label: 'H.264', value: 'h264_nvenc', tags: ['h264_nvenc', 'NVIDIA'] },
+  { label: 'H.265/HEVC', value: 'hevc_nvenc', tags: ['hevc_nvenc', 'NVIDIA'] },
+  { label: 'H.264', value: 'h264_amf', tags: ['h264_amf', 'AMD'] },
+  { label: 'H.265/HEVC', value: 'hevc_amf', tags: ['hevc_amf', 'AMD'] },
+  { label: 'H.264', value: 'h264_qsv', tags: ['h264_qsv', 'Intel'] },
+  { label: 'H.265/HEVC', value: 'hevc_qsv', tags: ['hevc_qsv', 'Intel'] },
+  { label: 'AV1', value: 'libsvtav1', tags: ['libsvtav1'] },
+  { label: 'AV1', value: 'libaom-av1', tags: ['libaom-av1'] },
+  { label: 'AV1', value: 'av1_nvenc', tags: ['av1_nvenc', 'NVIDIA'] },
+  { label: 'AV1', value: 'av1_amf', tags: ['av1_amf', 'AMD'] },
+  { label: 'AV1', value: 'av1_qsv', tags: ['av1_qsv', 'Intel'] },
+  { label: 'VP8', value: 'libvpx', tags: ['libvpx'] },
+  { label: 'VP9', value: 'libvpx-vp9', tags: ['libvpx-vp9'] },
+  { label: 'MPEG-4 Part 2', value: 'mpeg4', tags: ['mpeg4'] },
+  { label: 'MPEG-2', value: 'mpeg2video', tags: ['mpeg2video'] },
+  { label: 'Apple ProRes', value: 'prores', tags: ['prores'] },
+  { label: 'Avid DNxHR', value: 'dnxhd', tags: ['dnxhd'] },
+  { label: 'JPEG', value: 'mjpeg', tags: ['mjpeg'] },
+  { label: 'FFV1', value: 'ffv1', tags: ['无损'] },
+  { label: 'GIF', value: 'gif', tags: ['动图'] },
 ];
 
 const X264_PRESET_OPTIONS = [
@@ -63,47 +82,47 @@ const X264_PRESET_OPTIONS = [
   { label: 'veryfast', value: 'veryfast' },
   { label: 'faster', value: 'faster' },
   { label: 'fast', value: 'fast' },
-  { label: 'medium (默认)', value: 'medium' },
+  { label: 'medium', value: 'medium', tags: ['默认'] },
   { label: 'slow', value: 'slow' },
   { label: 'slower', value: 'slower' },
   { label: 'veryslow', value: 'veryslow' },
 ];
 
 const TUNE_OPTIONS_FULL = [
-  { label: '无 (none)', value: 'none' },
-  { label: 'film · 实拍电影', value: 'film' },
-  { label: 'animation · 动画', value: 'animation' },
-  { label: 'grain · 胶片颗粒', value: 'grain' },
-  { label: 'stillimage · 静帧', value: 'stillimage' },
-  { label: 'fastdecode · 快速解码', value: 'fastdecode' },
-  { label: 'zerolatency · 零延迟', value: 'zerolatency' },
+  { label: '无', value: 'none', tags: ['none'] },
+  { label: 'film', value: 'film', tags: ['实拍电影'] },
+  { label: 'animation', value: 'animation', tags: ['动画'] },
+  { label: 'grain', value: 'grain', tags: ['胶片颗粒'] },
+  { label: 'stillimage', value: 'stillimage', tags: ['静帧'] },
+  { label: 'fastdecode', value: 'fastdecode', tags: ['快速解码'] },
+  { label: 'zerolatency', value: 'zerolatency', tags: ['零延迟'] },
 ];
 
 const PIXEL_FORMAT_OPTIONS = [
-  { label: 'yuv420p (最兼容)', value: 'yuv420p' },
+  { label: 'yuv420p', value: 'yuv420p', tags: ['最兼容'] },
   { label: 'yuv422p', value: 'yuv422p' },
   { label: 'yuv444p', value: 'yuv444p' },
-  { label: 'yuv420p10le (10-bit)', value: 'yuv420p10le' },
-  { label: 'yuv422p10le (10-bit)', value: 'yuv422p10le' },
-  { label: 'yuv444p10le (10-bit)', value: 'yuv444p10le' },
+  { label: 'yuv420p10le', value: 'yuv420p10le', tags: ['10-bit'] },
+  { label: 'yuv422p10le', value: 'yuv422p10le', tags: ['10-bit'] },
+  { label: 'yuv444p10le', value: 'yuv444p10le', tags: ['10-bit'] },
   { label: 'nv12', value: 'nv12' },
   { label: 'rgb24', value: 'rgb24' },
   { label: 'gbrp', value: 'gbrp' },
 ];
 
 const AUDIO_CODEC_OPTIONS = [
-  { label: '复制音频流 · copy', value: 'copy' },
-  { label: 'AAC · aac', value: 'aac' },
-  { label: 'MP3 · libmp3lame', value: 'libmp3lame' },
-  { label: 'Opus · libopus', value: 'libopus' },
-  { label: 'Vorbis · libvorbis', value: 'libvorbis' },
-  { label: 'FLAC · flac', value: 'flac' },
-  { label: 'WAV 16-bit · pcm_s16le', value: 'pcm_s16le' },
-  { label: 'WAV 24-bit · pcm_s24le', value: 'pcm_s24le' },
-  { label: 'ALAC · alac', value: 'alac' },
-  { label: 'AC-3 · ac3', value: 'ac3' },
-  { label: 'E-AC-3 · eac3', value: 'eac3' },
-  { label: 'WMA · wmav2', value: 'wmav2' },
+  { label: '复制音频流', value: 'copy', tags: ['copy'] },
+  { label: 'AAC', value: 'aac', tags: ['aac'] },
+  { label: 'MP3', value: 'libmp3lame', tags: ['libmp3lame'] },
+  { label: 'Opus', value: 'libopus', tags: ['libopus'] },
+  { label: 'Vorbis', value: 'libvorbis', tags: ['libvorbis'] },
+  { label: 'FLAC', value: 'flac', tags: ['flac'] },
+  { label: 'WAV 16-bit', value: 'pcm_s16le', tags: ['pcm_s16le'] },
+  { label: 'WAV 24-bit', value: 'pcm_s24le', tags: ['pcm_s24le'] },
+  { label: 'ALAC', value: 'alac', tags: ['alac'] },
+  { label: 'AC-3', value: 'ac3', tags: ['ac3'] },
+  { label: 'E-AC-3', value: 'eac3', tags: ['eac3'] },
+  { label: 'WMA', value: 'wmav2', tags: ['wmav2'] },
 ];
 
 const AUDIO_PROFILE_OPTIONS = [
@@ -115,22 +134,27 @@ const AUDIO_PROFILE_OPTIONS = [
 const SAMPLE_RATE_OPTIONS = [8000, 11025, 16000, 22050, 32000, 44100, 48000, 96000].map((r) => ({ label: `${r} Hz`, value: r }));
 
 const CHANNEL_OPTIONS = [
-  { label: '单声道 (1)', value: 1 },
-  { label: '立体声 (2)', value: 2 },
-  { label: '5.1 (6)', value: 6 },
+  { label: '单声道', value: 1, tags: ['1 声道'] },
+  { label: '立体声', value: 2, tags: ['2 声道'] },
+  { label: '5.1', value: 6, tags: ['6 声道'] },
 ];
 
 const RATE_MODE_OPTIONS = [
-  { label: '质量优先 · CRF', value: 'crf' },
+  { label: '质量优先', value: 'crf', tags: ['CRF'] },
   { label: '目标码率', value: 'bitrate' },
   { label: '目标文件体积', value: 'filesize' },
 ];
+
+const TWO_PASS_CODECS = new Set(['libx264', 'libx265', 'libvpx', 'libvpx-vp9']);
+function canUseTwoPass(videoCodec: string, rateMode: string): boolean {
+  return TWO_PASS_CODECS.has(videoCodec) && (rateMode === 'bitrate' || rateMode === 'filesize');
+}
 
 // 视频编码器元信息：支持的封装白名单、编码器专属"规格/Profile"、以及是否支持 质量/速度/调优
 type VideoMeta = {
   label: string;
   containers: string[];
-  profiles: { value: string; label: string }[];
+  profiles: ui.ComboBoxOption[];
   quality: 'crf' | 'cq' | null;
   speed: boolean;
   tune: boolean;
@@ -145,10 +169,10 @@ const VIDEO_META: Record<string, VideoMeta> = {
   libx264: {
     label: 'H.264', containers: ['mp4', 'mkv', 'mov', 'ts', 'm4v', 'avi', 'flv', '3gp', 'mpeg'],
     profiles: [
-      { value: 'high', label: 'High (高，最通用)' },
+      { value: 'high', label: 'High', tags: ['最通用'] },
       { value: 'main', label: 'Main' },
-      { value: 'baseline', label: 'Baseline (老旧设备)' },
-      { value: 'high10', label: 'High 10 (10-bit)' },
+      { value: 'baseline', label: 'Baseline', tags: ['老旧设备'] },
+      { value: 'high10', label: 'High 10', tags: ['10-bit'] },
       { value: 'high422', label: 'High 4:2:2' },
       { value: 'high444', label: 'High 4:4:4' },
     ],
@@ -158,10 +182,10 @@ const VIDEO_META: Record<string, VideoMeta> = {
     label: 'H.265/HEVC', containers: ['mp4', 'mkv', 'mov', 'ts', 'm4v', 'avi'],
     profiles: [
       { value: 'main', label: 'Main' },
-      { value: 'main10', label: 'Main 10 (10-bit, 最通用)' },
+      { value: 'main10', label: 'Main 10', tags: ['10-bit', '最通用'] },
       { value: 'main422-10', label: 'Main 4:2:2 10-bit' },
       { value: 'main444-10', label: 'Main 4:4:4 10-bit' },
-      { value: 'main12', label: 'Main 12 (12-bit)' },
+      { value: 'main12', label: 'Main 12', tags: ['12-bit'] },
     ],
     quality: 'crf', speed: true, tune: true, defaultPixFmt: 'yuv420p',
   },
@@ -183,22 +207,22 @@ const VIDEO_META: Record<string, VideoMeta> = {
   prores: {
     label: 'Apple ProRes', containers: ['mov', 'mkv'],
     profiles: [
-      { value: 'proxy', label: 'Proxy (代理, 最低码率)' },
-      { value: 'lt', label: 'LT (长GOP 轻量)' },
-      { value: '422', label: '422 (标准)' },
-      { value: '422hq', label: '422 HQ (高质量)' },
-      { value: '4444', label: '4444 (含 Alpha 通道)' },
-      { value: '4444xq', label: '4444 XQ (极致质量)' },
+      { value: 'proxy', label: 'Proxy', tags: ['代理', '最低码率'] },
+      { value: 'lt', label: 'LT', tags: ['轻量'] },
+      { value: '422', label: '422', tags: ['标准'] },
+      { value: '422hq', label: '422 HQ', tags: ['高质量'] },
+      { value: '4444', label: '4444', tags: ['Alpha'] },
+      { value: '4444xq', label: '4444 XQ', tags: ['极致质量'] },
     ],
     quality: null, speed: false, tune: false, defaultPixFmt: 'yuv422p10le',
   },
   dnxhd: {
     label: 'Avid DNxHR', containers: ['mov', 'mkv'],
     profiles: [
-      { value: 'dnxhr_lb', label: 'LB (低码率)' },
-      { value: 'dnxhr_sq', label: 'SQ (标准质量)' },
-      { value: 'dnxhr_hq', label: 'HQ (高质量)' },
-      { value: 'dnxhr_hqx', label: 'HQX (超高质 10/12-bit)' },
+      { value: 'dnxhr_lb', label: 'LB', tags: ['低码率'] },
+      { value: 'dnxhr_sq', label: 'SQ', tags: ['标准质量'] },
+      { value: 'dnxhr_hq', label: 'HQ', tags: ['高质量'] },
+      { value: 'dnxhr_hqx', label: 'HQX', tags: ['超高质量', '10/12-bit'] },
     ],
     quality: null, speed: false, tune: false, defaultPixFmt: 'yuv422p',
   },
@@ -239,7 +263,7 @@ function compatibleAudioCodecs(container: string) {
   });
 }
 
-const DEFAULT_ENCODE_FORM = {
+export const DEFAULT_ENCODE_FORM = {
   name: '',
   container: 'mp4',
   videoCodec: 'libx264',
@@ -265,6 +289,11 @@ const DEFAULT_ENCODE_FORM = {
   style: 2,
   rateMode: 'crf' as 'crf' | 'bitrate' | 'filesize',
   targetFileSizeMb: 0,
+  twoPass: false,
+  previewDuringEncode: true,
+  ...DEFAULT_OUTPUT_FORM,
+  // 编码默认重命名：原始文件名_分辨率_帧率_编码_码率.扩展名
+  outputNameTemplate: DEFAULT_ENCODE_NAME_TEMPLATE,
 };
 
 // 预设创建的初始表单：全部空白（不预选任何项）；空白项在套用预设时被忽略、保留运行时默认值
@@ -294,6 +323,10 @@ const BLANK_ENCODE_FORM = {
   style: '' as any,
   rateMode: '' as any,
   targetFileSizeMb: 0,
+  twoPass: false,
+  previewDuringEncode: false,
+  ...DEFAULT_OUTPUT_FORM,
+  outputNameTemplate: DEFAULT_ENCODE_NAME_TEMPLATE,
 };
 
 // 把当前表单整理成分组（按标签页）的「标签 / 值」列表，供右侧常驻汇总面板展示
@@ -382,6 +415,17 @@ function summarizeEncode(f: any): SumGroup[] {
         ['音频标准化', f.loudnorm ? '开启' : '关闭'],
       ],
     },
+    {
+      title: '任务设置',
+      items: [
+        ['2-pass 编码', f.twoPass ? '开启' : '关闭'],
+        ['进度预览', f.previewDuringEncode ? '开启' : '关闭'],
+      ],
+    },
+    {
+      title: '输出位置',
+      items: [['存储位置', describeOutputSettings(f)]],
+    },
   ];
 }
 
@@ -412,8 +456,17 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
         container: f.container ? (stillOk ? f.container : compatibleContainers(vc)[0]?.value ?? '') : '',
         videoProfile: m && m.profiles.length ? m.profiles[0].value : '',
         pixelFormat: m && m.defaultPixFmt ? m.defaultPixFmt : f.pixelFormat,
+        twoPass: TWO_PASS_CODECS.has(vc) ? f.twoPass : false,
       };
     });
+  };
+
+  const onRateModeChange = (rateMode: string) => {
+    setForm((f) => ({
+      ...f,
+      rateMode,
+      twoPass: canUseTwoPass(f.videoCodec, rateMode) ? f.twoPass : false,
+    }));
   };
 
   // 改了封装 → 已选音频编码器若不兼容则清空（保持空白语义，不替用户预选）
@@ -430,12 +483,12 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
   // 统一排序 —— 第一项为「原始 / 复制」，最后一项为「自定义」；中间为常用数值。
   const RESOLUTION_PRESETS = [
     { label: '原始分辨率', value: 'orig' },
-    { label: '1920 × 1080 (1080p)', value: '1920x1080' },
-    { label: '1280 × 720 (720p)', value: '1280x720' },
-    { label: '3840 × 2160 (4K)', value: '3840x2160' },
-    { label: '2560 × 1440 (2K)', value: '2560x1440' },
-    { label: '1080 × 1920 (竖屏 1080p)', value: '1080x1920' },
-    { label: '720 × 1280 (竖屏 720p)', value: '720x1280' },
+    { label: '1920 × 1080', value: '1920x1080', tags: ['1080p'] },
+    { label: '1280 × 720', value: '1280x720', tags: ['720p'] },
+    { label: '3840 × 2160', value: '3840x2160', tags: ['4K'] },
+    { label: '2560 × 1440', value: '2560x1440', tags: ['2K'] },
+    { label: '1080 × 1920', value: '1080x1920', tags: ['竖屏', '1080p'] },
+    { label: '720 × 1280', value: '720x1280', tags: ['竖屏', '720p'] },
     { label: '自定义', value: '__custom__' },
   ];
   const FPS_PRESETS = [
@@ -496,7 +549,7 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
   const abrManualDisabled = abrSel !== '__custom__';
 
   const [tab, setTab] = useState(0);
-  const TABS = ['视频编码', '封装格式', '分辨率与帧率', '音频', '后期处理'];
+  const TABS = ['视频编码', '封装格式', '分辨率与帧率', '音频', '后期处理', '任务设置', '输出位置'];
 
   // 预设增删改查（配合最左侧列表）
   const resetSels = () => { setResSel(''); setFpsSel(''); setVbrSel(''); setAbrSel(''); };
@@ -505,7 +558,13 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
     const p = ctx.presets.find((x) => x.id === id);
     if (!p) return;
     setEditingId(id);
-    setForm({ ...BLANK_ENCODE_FORM, ...p.params, name: p.name });
+    setForm({
+      ...BLANK_ENCODE_FORM,
+      ...p.params,
+      twoPass: !!p.params.twoPass && canUseTwoPass(p.params.videoCodec, p.params.rateMode),
+      previewDuringEncode: p.params.previewDuringEncode ?? true,
+      name: p.name,
+    });
     // 编辑已有预设：以「自定义」模式载入实际数值，右侧手动输入可编辑
     setResSel(p.params.keepRes ? 'orig' : '__custom__');
     setFpsSel(p.params.fps === 0 ? 'orig' : '__custom__');
@@ -530,7 +589,170 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
     prevOpen.current = ctx.isOpen;
   }, [ctx.isOpen]);
 
-  if (!ctx.isOpen) return null;
+  const videoFieldRows: Array<{ id: string; content: ReactNode }> = [
+    {
+      id: 'video-codec',
+      content: (
+        <>
+          <ui.FieldLabel>视频编码器</ui.FieldLabel>
+          <ui.ComboBox value={form.videoCodec} options={VIDEO_CODEC_OPTIONS} onChange={onVideoCodecChange} />
+        </>
+      ),
+    },
+  ];
+  if (vMeta?.profiles.length) {
+    videoFieldRows.push({
+      id: 'video-profile',
+      content: (
+        <>
+          <ui.FieldLabel>编码规格 / Profile</ui.FieldLabel>
+          <ui.ComboBox value={form.videoProfile} options={vMeta.profiles} onChange={(v) => set('videoProfile', v)} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy) {
+    videoFieldRows.push({
+      id: 'rate-mode',
+      content: (
+        <>
+          <ui.FieldLabel>码率控制</ui.FieldLabel>
+          <ui.ComboBox value={form.rateMode || 'crf'} options={RATE_MODE_OPTIONS} onChange={onRateModeChange} />
+        </>
+      ),
+    });
+  }
+
+  const audioFieldRows: Array<{ id: string; content: ReactNode }> = [
+    {
+      id: 'audio-codec',
+      content: (
+        <>
+          <ui.FieldLabel>音频编码器</ui.FieldLabel>
+          <ui.ComboBox value={form.audioCodec} options={audioOptions} onChange={(v) => set('audioCodec', v)} />
+        </>
+      ),
+    },
+  ];
+  if (form.audioCodec === 'aac') {
+    audioFieldRows.push({
+      id: 'audio-profile',
+      content: (
+        <>
+          <ui.FieldLabel>AAC 规格</ui.FieldLabel>
+          <ui.ComboBox value={form.audioProfile} options={AUDIO_PROFILE_OPTIONS} onChange={(v) => set('audioProfile', v)} />
+        </>
+      ),
+    });
+  }
+  audioFieldRows.push(
+    {
+      id: 'audio-bitrate',
+      content: (
+        <>
+          <ui.FieldLabel>音频码率</ui.FieldLabel>
+          <div className="se-combo-num">
+            <ui.ComboBox value={abrSel} options={AUDIO_BITRATE_PRESETS} onChange={onAbrSel} disabled={isAudioCopy} />
+            <ui.NumberField value={form.audioBitrate} min={0} max={640} step={8} decimals={0} suffix="kbps" disabled={isAudioCopy || abrManualDisabled} onChange={(v) => set('audioBitrate', v)} />
+          </div>
+        </>
+      ),
+    },
+    {
+      id: 'audio-sample-rate',
+      content: (
+        <>
+          <ui.FieldLabel>采样率</ui.FieldLabel>
+          <ui.ComboBox value={form.audioSampleRate} options={SAMPLE_RATE_OPTIONS} onChange={(v) => set('audioSampleRate', v)} disabled={isAudioCopy} />
+        </>
+      ),
+    },
+    {
+      id: 'audio-channels',
+      content: (
+        <>
+          <ui.FieldLabel>声道</ui.FieldLabel>
+          <ui.ComboBox value={form.audioChannels} options={CHANNEL_OPTIONS} onChange={(v) => set('audioChannels', v)} disabled={isAudioCopy} />
+        </>
+      ),
+    },
+  );
+  if (!isCopy && (form.rateMode === 'crf' || !form.rateMode) && vMeta?.quality) {
+    videoFieldRows.push({
+      id: 'quality',
+      content: (
+        <>
+          <ui.FieldLabel>{qualityLabel}</ui.FieldLabel>
+          <ui.NumberField value={form.crf} min={0} max={51} step={1} onChange={(v) => set('crf', v)} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy && form.rateMode === 'bitrate') {
+    videoFieldRows.push({
+      id: 'video-bitrate',
+      content: (
+        <>
+          <ui.FieldLabel>视频码率</ui.FieldLabel>
+          <div className="se-combo-num">
+            <ui.ComboBox value={vbrSel} options={VIDEO_BITRATE_PRESETS} onChange={onVbrSel} />
+            <ui.NumberField
+              value={form.videoBitrate / 1000}
+              min={0} max={100} step={0.5} decimals={1} suffix="Mbps"
+              disabled={vbrManualDisabled}
+              onChange={(v) => set('videoBitrate', Math.round(v * 1000))}
+            />
+          </div>
+        </>
+      ),
+    });
+  }
+  if (!isCopy && form.rateMode === 'filesize') {
+    videoFieldRows.push({
+      id: 'target-file-size',
+      content: (
+        <>
+          <ui.FieldLabel>目标文件体积</ui.FieldLabel>
+          <ui.NumberField value={form.targetFileSizeMb || 0} min={0} max={99999} step={1} decimals={0} suffix="MB" onChange={(v) => set('targetFileSizeMb', v)} />
+        </>
+      ),
+    });
+  }
+  if (vMeta?.speed) {
+    videoFieldRows.push({
+      id: 'encode-speed',
+      content: (
+        <>
+          <ui.FieldLabel>编码速度</ui.FieldLabel>
+          <ui.ComboBox value={form.preset} options={X264_PRESET_OPTIONS} onChange={(v) => set('preset', v)} />
+        </>
+      ),
+    });
+  }
+  if (vMeta?.tune) {
+    videoFieldRows.push({
+      id: 'tune',
+      content: (
+        <>
+          <ui.FieldLabel>调优 (tune)</ui.FieldLabel>
+          <ui.ComboBox value={form.tune} options={TUNE_OPTIONS_FULL} onChange={(v) => set('tune', v)} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy) {
+    videoFieldRows.push({
+      id: 'pixel-format',
+      content: (
+        <>
+          <ui.FieldLabel>像素格式</ui.FieldLabel>
+          <ui.ComboBox value={form.pixelFormat} options={PIXEL_FORMAT_OPTIONS} onChange={(v) => set('pixelFormat', v)} />
+        </>
+      ),
+    });
+  }
+
+  if (!ctx.isMounted) return null;
   return (
     <PresetManageDialog
       title="管理转码预设"
@@ -545,6 +767,8 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
       onExport={ctx.onExport}
       onReorder={ctx.onReorder}
       onClose={ctx.onClose}
+      onExited={ctx.onExited}
+      closing={ctx.closing}
       onSave={onSavePreset}
       saveLabel={editingId ? '保存修改' : '保存预设'}
       canSave={!!String(form.name).trim()}
@@ -567,70 +791,13 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
 
           <div className="se-preset-cols">
             <div className="se-preset-col">
-            {tab === 0 && (
-              <>
-                <ui.FieldGrid>
-                  <ui.FieldLabel>视频编码器</ui.FieldLabel>
-                  <ui.ComboBox value={form.videoCodec} options={VIDEO_CODEC_OPTIONS} onChange={onVideoCodecChange} />
-                  {vMeta && vMeta.profiles.length > 0 && (
-                    <>
-                      <ui.FieldLabel>编码规格 / Profile</ui.FieldLabel>
-                      <ui.ComboBox value={form.videoProfile} options={vMeta.profiles} onChange={(v) => set('videoProfile', v)} />
-                    </>
-                  )}
-                  {!isCopy && (
-                    <>
-                      <ui.FieldLabel>码率控制</ui.FieldLabel>
-                      <ui.ComboBox value={form.rateMode || 'crf'} options={RATE_MODE_OPTIONS} onChange={(v) => set('rateMode', v)} />
-                      {(form.rateMode === 'crf' || !form.rateMode) && vMeta && vMeta.quality && (
-                        <>
-                          <ui.FieldLabel>{qualityLabel}</ui.FieldLabel>
-                          <ui.NumberField value={form.crf} min={0} max={51} step={1} onChange={(v) => set('crf', v)} />
-                        </>
-                      )}
-                      {form.rateMode === 'bitrate' && (
-                        <>
-                          <ui.FieldLabel>视频码率</ui.FieldLabel>
-                          <div className="se-combo-num">
-                            <ui.ComboBox value={vbrSel} options={VIDEO_BITRATE_PRESETS} onChange={onVbrSel} />
-                            <ui.NumberField
-                              value={form.videoBitrate / 1000}
-                              min={0} max={100} step={0.5} decimals={1} suffix="Mbps"
-                              disabled={vbrManualDisabled}
-                              onChange={(v) => set('videoBitrate', Math.round(v * 1000))}
-                            />
-                          </div>
-                        </>
-                      )}
-                      {form.rateMode === 'filesize' && (
-                        <>
-                          <ui.FieldLabel>目标文件体积</ui.FieldLabel>
-                          <ui.NumberField value={form.targetFileSizeMb || 0} min={0} max={99999} step={1} decimals={0} suffix="MB" onChange={(v) => set('targetFileSizeMb', v)} />
-                        </>
-                      )}
-                    </>
-                  )}
-                  {vMeta && vMeta.speed && (
-                    <>
-                      <ui.FieldLabel>编码速度</ui.FieldLabel>
-                      <ui.ComboBox value={form.preset} options={X264_PRESET_OPTIONS} onChange={(v) => set('preset', v)} />
-                    </>
-                  )}
-                  {vMeta && vMeta.tune && (
-                    <>
-                      <ui.FieldLabel>调优 (tune)</ui.FieldLabel>
-                      <ui.ComboBox value={form.tune} options={TUNE_OPTIONS_FULL} onChange={(v) => set('tune', v)} />
-                    </>
-                  )}
-                  {!isCopy && (
-                    <>
-                      <ui.FieldLabel>像素格式</ui.FieldLabel>
-                      <ui.ComboBox value={form.pixelFormat} options={PIXEL_FORMAT_OPTIONS} onChange={(v) => set('pixelFormat', v)} />
-                    </>
-                  )}
-                </ui.FieldGrid>
-                {isCopy && <ui.HintLabel>视频流将直接复制、不重新编码；仅可更改封装格式与音频参数。</ui.HintLabel>}
-              </>
+              {tab === 0 && (
+              <div className="se-preset-tab-content">
+                <ui.AnimatedFieldGrid rows={videoFieldRows} />
+                <ui.AnimatedCollapse open={isCopy} className="se-preset-content-collapse">
+                  <ui.HintLabel>视频流将直接复制、不重新编码；仅可更改封装格式与音频参数。</ui.HintLabel>
+                </ui.AnimatedCollapse>
+              </div>
             )}
 
             {tab === 1 && (
@@ -641,56 +808,44 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
             )}
 
             {tab === 2 && (
-              isCopy ? (
-                <ui.HintLabel>视频流复制模式下无法缩放或更改帧率，输出跟随源视频。</ui.HintLabel>
-              ) : (
-                <ui.FieldGrid>
-                  <ui.FieldLabel>分辨率</ui.FieldLabel>
-                  <ui.ComboBox value={resSel} options={RESOLUTION_PRESETS} onChange={onResSel} />
-                  <ui.FieldLabel>自定义分辨率</ui.FieldLabel>
-                  <div className="se-res-row">
-                    <ui.IntField value={form.scaleW} min={0} max={8192} suffix="px" disabled={resManualDisabled} onChange={(v) => set('scaleW', v)} />
-                    <span className="se-x">×</span>
-                    <ui.IntField value={form.scaleH} min={0} max={8192} suffix="px" disabled={resManualDisabled} onChange={(v) => set('scaleH', v)} />
-                  </div>
-                  <ui.FieldLabel>帧率</ui.FieldLabel>
-                  <div className="se-combo-num">
-                    <ui.ComboBox value={fpsSel} options={FPS_PRESETS} onChange={onFpsSel} />
-                    <ui.NumberField value={form.fps} min={0} max={120} step={1} decimals={0} suffix="fps" disabled={fpsManualDisabled} onChange={(v) => set('fps', v)} />
-                  </div>
-                </ui.FieldGrid>
-              )
+              <div className="se-preset-tab-content">
+                <ui.AnimatedCollapse open={isCopy} className="se-preset-content-collapse">
+                  <ui.HintLabel>视频流复制模式下无法缩放或更改帧率，输出跟随源视频。</ui.HintLabel>
+                </ui.AnimatedCollapse>
+                <ui.AnimatedCollapse open={!isCopy} className="se-preset-content-collapse">
+                  <ui.FieldGrid>
+                    <ui.FieldLabel>分辨率</ui.FieldLabel>
+                    <ui.ComboBox value={resSel} options={RESOLUTION_PRESETS} onChange={onResSel} />
+                    <ui.FieldLabel>自定义分辨率</ui.FieldLabel>
+                    <div className="se-res-row">
+                      <ui.IntField value={form.scaleW} min={0} max={8192} suffix="px" disabled={resManualDisabled} onChange={(v) => set('scaleW', v)} />
+                      <span className="se-x">×</span>
+                      <ui.IntField value={form.scaleH} min={0} max={8192} suffix="px" disabled={resManualDisabled} onChange={(v) => set('scaleH', v)} />
+                    </div>
+                    <ui.FieldLabel>帧率</ui.FieldLabel>
+                    <div className="se-combo-num">
+                      <ui.ComboBox value={fpsSel} options={FPS_PRESETS} onChange={onFpsSel} />
+                      <ui.NumberField value={form.fps} min={0} max={120} step={1} decimals={0} suffix="fps" disabled={fpsManualDisabled} onChange={(v) => set('fps', v)} />
+                    </div>
+                  </ui.FieldGrid>
+                </ui.AnimatedCollapse>
+              </div>
             )}
 
             {tab === 3 && (
-              isGif ? (
-                <ui.HintLabel>GIF 不含音频轨，音频设置将被忽略。</ui.HintLabel>
-              ) : (
-                <ui.FieldGrid>
-                  <ui.FieldLabel>音频编码器</ui.FieldLabel>
-                  <ui.ComboBox value={form.audioCodec} options={audioOptions} onChange={(v) => set('audioCodec', v)} />
-                  {form.audioCodec === 'aac' && (
-                    <>
-                      <ui.FieldLabel>AAC 规格</ui.FieldLabel>
-                      <ui.ComboBox value={form.audioProfile} options={AUDIO_PROFILE_OPTIONS} onChange={(v) => set('audioProfile', v)} />
-                    </>
-                  )}
-                  <ui.FieldLabel>音频码率</ui.FieldLabel>
-                  <div className="se-combo-num">
-                    <ui.ComboBox value={abrSel} options={AUDIO_BITRATE_PRESETS} onChange={onAbrSel} disabled={isAudioCopy} />
-                    <ui.NumberField value={form.audioBitrate} min={0} max={640} step={8} decimals={0} suffix="kbps" disabled={isAudioCopy || abrManualDisabled} onChange={(v) => set('audioBitrate', v)} />
-                  </div>
-                  <ui.FieldLabel>采样率</ui.FieldLabel>
-                  <ui.ComboBox value={form.audioSampleRate} options={SAMPLE_RATE_OPTIONS} onChange={(v) => set('audioSampleRate', v)} disabled={isAudioCopy} />
-                  <ui.FieldLabel>声道</ui.FieldLabel>
-                  <ui.ComboBox value={form.audioChannels} options={CHANNEL_OPTIONS} onChange={(v) => set('audioChannels', v)} disabled={isAudioCopy} />
-                </ui.FieldGrid>
-              )
+              <div className="se-preset-tab-content">
+                <ui.AnimatedCollapse open={isGif} className="se-preset-content-collapse">
+                  <ui.HintLabel>GIF 不含音频轨，音频设置将被忽略。</ui.HintLabel>
+                </ui.AnimatedCollapse>
+                <ui.AnimatedCollapse open={!isGif} className="se-preset-content-collapse">
+                  <ui.AnimatedFieldGrid rows={audioFieldRows} />
+                </ui.AnimatedCollapse>
+              </div>
             )}
 
             {tab === 4 && (
-              <>
-                {!isCopy && (
+              <div className="se-preset-tab-content">
+                <ui.AnimatedCollapse open={!isCopy} className="se-preset-content-collapse">
                   <ui.FieldGrid>
                     <ui.FieldLabel>锐化</ui.FieldLabel>
                     <ui.ComboBox value={form.unsharp} options={UNSHARP_OPTIONS} onChange={(v) => set('unsharp', v)} />
@@ -699,10 +854,47 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
                     <ui.FieldLabel>风格</ui.FieldLabel>
                     <ui.ComboBox value={form.style} options={TUNE_OPTIONS} onChange={(v) => set('style', v)} />
                   </ui.FieldGrid>
-                )}
-                {isCopy && <ui.HintLabel>视频流复制模式下滤镜（锐化 / 降噪 / 风格）不可用。</ui.HintLabel>}
+                </ui.AnimatedCollapse>
+                <ui.AnimatedCollapse open={isCopy} className="se-preset-content-collapse">
+                  <ui.HintLabel>视频流复制模式下滤镜（锐化 / 降噪 / 风格）不可用。</ui.HintLabel>
+                </ui.AnimatedCollapse>
                 <ui.Checkbox checked={form.loudnorm} onChange={(v) => set('loudnorm', v)}>启用音频标准化</ui.Checkbox>
-              </>
+              </div>
+            )}
+
+            {tab === 5 && (
+              <div className="se-preset-tab-content">
+                <ui.Checkbox
+                  checked={!!form.twoPass}
+                  disabled={!canUseTwoPass(form.videoCodec, form.rateMode)}
+                  onChange={(v) => set('twoPass', v)}
+                >
+                  启用 2-pass 编码（固定码率 / 目标体积）
+                </ui.Checkbox>
+                <ui.Checkbox checked={form.previewDuringEncode} onChange={(v) => set('previewDuringEncode', v)}>
+                  编码时跟随当前素材
+                </ui.Checkbox>
+              </div>
+            )}
+            {tab === 6 && (
+              <OutputLocationFields
+                value={form}
+                presetName={form.name}
+                extension={form.container || 'mp4'}
+                defaultSuffix="_se"
+                encodeLabels={buildEncodeNameLabels({
+                  scaleW: form.scaleW,
+                  scaleH: form.scaleH,
+                  keepRes: form.keepRes,
+                  fps: form.fps,
+                  videoCodec: form.videoCodec,
+                  rateMode: form.rateMode,
+                  videoBitrate: form.videoBitrate,
+                  crf: form.crf,
+                  targetFileSizeMb: form.targetFileSizeMb,
+                })}
+                onChange={(key, value) => set(key, value)}
+              />
             )}
             </div>
             <aside className="se-preset-summary">
@@ -710,14 +902,18 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
               {summary.map((g) => (
                 <div className="se-sum-group" key={g.title}>
                   <div className="se-sum-group-title">{g.title}</div>
-                  <div className="se-sum-list">
-                    {g.items.map(([label, val]) => (
-                      <div className="se-sum-item" key={label}>
+                  <ui.AnimatedList
+                    items={g.items}
+                    getKey={([label]) => label}
+                    className="se-sum-list"
+                    itemClassName="se-sum-item-motion"
+                    renderItem={([label, val]) => (
+                      <div className="se-sum-item">
                         <span className="se-sum-label">{label}</span>
-                        <span className={`se-sum-val${val && val !== '—' ? '' : ' is-empty'}`}>{val}</span>
+                        <ui.AnimatedValue value={val} className={`se-sum-val${val && val !== '—' ? '' : ' is-empty'}`} />
                       </div>
-                    ))}
-                  </div>
+                    )}
+                  />
                 </div>
               ))}
             </aside>
@@ -744,6 +940,11 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
     set('container', form.container ? (stillOk ? form.container : compatibleContainers(vc)[0]?.value ?? '') : '');
     set('videoProfile', m && m.profiles.length ? m.profiles[0].value : '');
     set('pixelFormat', m && m.defaultPixFmt ? m.defaultPixFmt : form.pixelFormat);
+    if (!TWO_PASS_CODECS.has(vc)) set('twoPass', false);
+  };
+  const onRateModeChange = (rateMode: string) => {
+    set('rateMode', rateMode);
+    if (!canUseTwoPass(form.videoCodec, rateMode)) set('twoPass', false);
   };
   const onContainerChange = (c: string) => {
     const ok = !form.audioCodec || compatibleAudioCodecs(c).some((o) => o.value === form.audioCodec);
@@ -751,62 +952,165 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
     set('audioCodec', ok ? form.audioCodec : '');
   };
 
+  const videoFieldRows: Array<{ id: string; content: ReactNode }> = [
+    {
+      id: 'video-codec',
+      content: (
+        <>
+          <ui.FieldLabel>视频编码器</ui.FieldLabel>
+          <ui.ComboBox value={form.videoCodec} options={VIDEO_CODEC_OPTIONS} onChange={onVideoCodecChange} />
+        </>
+      ),
+    },
+  ];
+  if (vMeta?.profiles.length) {
+    videoFieldRows.push({
+      id: 'video-profile',
+      content: (
+        <>
+          <ui.FieldLabel>编码规格 / Profile</ui.FieldLabel>
+          <ui.ComboBox value={form.videoProfile} options={vMeta.profiles} onChange={(v) => set('videoProfile', v)} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy) {
+    videoFieldRows.push({
+      id: 'rate-mode',
+      content: (
+        <>
+          <ui.FieldLabel>码率控制</ui.FieldLabel>
+          <ui.ComboBox value={form.rateMode || 'crf'} options={RATE_MODE_OPTIONS} onChange={onRateModeChange} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy && (form.rateMode === 'crf' || !form.rateMode) && vMeta?.quality) {
+    videoFieldRows.push({
+      id: 'quality',
+      content: (
+        <>
+          <ui.FieldLabel>{qualityLabel}</ui.FieldLabel>
+          <ui.NumberField value={form.crf} min={0} max={51} step={1} onChange={(v) => set('crf', v)} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy && form.rateMode === 'bitrate') {
+    videoFieldRows.push({
+      id: 'video-bitrate',
+      content: (
+        <>
+          <ui.FieldLabel>视频码率</ui.FieldLabel>
+          <ui.NumberField value={form.videoBitrate / 1000} min={0} max={100} step={0.5} decimals={1} suffix="Mbps" onChange={(v) => set('videoBitrate', Math.round(v * 1000))} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy && form.rateMode === 'filesize') {
+    videoFieldRows.push({
+      id: 'target-file-size',
+      content: (
+        <>
+          <ui.FieldLabel>目标文件体积</ui.FieldLabel>
+          <ui.NumberField value={form.targetFileSizeMb || 0} min={0} max={99999} step={1} decimals={0} suffix="MB" onChange={(v) => set('targetFileSizeMb', v)} />
+        </>
+      ),
+    });
+  }
+  if (vMeta?.speed) {
+    videoFieldRows.push({
+      id: 'encode-speed',
+      content: (
+        <>
+          <ui.FieldLabel>编码速度</ui.FieldLabel>
+          <ui.ComboBox value={form.preset} options={X264_PRESET_OPTIONS} onChange={(v) => set('preset', v)} />
+        </>
+      ),
+    });
+  }
+  if (vMeta?.tune) {
+    videoFieldRows.push({
+      id: 'tune',
+      content: (
+        <>
+          <ui.FieldLabel>调优 (tune)</ui.FieldLabel>
+          <ui.ComboBox value={form.tune} options={TUNE_OPTIONS_FULL} onChange={(v) => set('tune', v)} />
+        </>
+      ),
+    });
+  }
+  if (!isCopy) {
+    videoFieldRows.push({
+      id: 'pixel-format',
+      content: (
+        <>
+          <ui.FieldLabel>像素格式</ui.FieldLabel>
+          <ui.ComboBox value={form.pixelFormat} options={PIXEL_FORMAT_OPTIONS} onChange={(v) => set('pixelFormat', v)} />
+        </>
+      ),
+    });
+  }
+
+  const audioFieldRows: Array<{ id: string; content: ReactNode }> = [
+    {
+      id: 'audio-codec',
+      content: (
+        <>
+          <ui.FieldLabel>音频编码器</ui.FieldLabel>
+          <ui.ComboBox value={form.audioCodec} options={audioOptions} onChange={(v) => set('audioCodec', v)} />
+        </>
+      ),
+    },
+  ];
+  if (form.audioCodec === 'aac') {
+    audioFieldRows.push({
+      id: 'audio-profile',
+      content: (
+        <>
+          <ui.FieldLabel>AAC 规格</ui.FieldLabel>
+          <ui.ComboBox value={form.audioProfile} options={AUDIO_PROFILE_OPTIONS} onChange={(v) => set('audioProfile', v)} />
+        </>
+      ),
+    });
+  }
+  audioFieldRows.push(
+    {
+      id: 'audio-bitrate',
+      content: (
+        <>
+          <ui.FieldLabel>音频码率</ui.FieldLabel>
+          <ui.NumberField value={form.audioBitrate} min={0} max={640} step={8} decimals={0} suffix="kbps" disabled={isAudioCopy} onChange={(v) => set('audioBitrate', v)} />
+        </>
+      ),
+    },
+    {
+      id: 'audio-sample-rate',
+      content: (
+        <>
+          <ui.FieldLabel>采样率</ui.FieldLabel>
+          <ui.ComboBox value={form.audioSampleRate} options={SAMPLE_RATE_OPTIONS} onChange={(v) => set('audioSampleRate', v)} disabled={isAudioCopy} />
+        </>
+      ),
+    },
+    {
+      id: 'audio-channels',
+      content: (
+        <>
+          <ui.FieldLabel>声道</ui.FieldLabel>
+          <ui.ComboBox value={form.audioChannels} options={CHANNEL_OPTIONS} onChange={(v) => set('audioChannels', v)} disabled={isAudioCopy} />
+        </>
+      ),
+    },
+  );
+
   return (
     <>
       <ui.ParamGroup title="视频编码">
-        <ui.FieldGrid>
-          <ui.FieldLabel>视频编码器</ui.FieldLabel>
-          <ui.ComboBox value={form.videoCodec} options={VIDEO_CODEC_OPTIONS} onChange={onVideoCodecChange} />
-          {vMeta && vMeta.profiles.length > 0 && (
-            <>
-              <ui.FieldLabel>编码规格 / Profile</ui.FieldLabel>
-              <ui.ComboBox value={form.videoProfile} options={vMeta.profiles} onChange={(v) => set('videoProfile', v)} />
-            </>
-          )}
-          {!isCopy && (
-            <>
-              <ui.FieldLabel>码率控制</ui.FieldLabel>
-              <ui.ComboBox value={form.rateMode || 'crf'} options={RATE_MODE_OPTIONS} onChange={(v) => set('rateMode', v)} />
-              {(form.rateMode === 'crf' || !form.rateMode) && vMeta && vMeta.quality && (
-                <>
-                  <ui.FieldLabel>{qualityLabel}</ui.FieldLabel>
-                  <ui.NumberField value={form.crf} min={0} max={51} step={1} onChange={(v) => set('crf', v)} />
-                </>
-              )}
-              {form.rateMode === 'bitrate' && (
-                <>
-                  <ui.FieldLabel>视频码率</ui.FieldLabel>
-                  <ui.NumberField value={form.videoBitrate / 1000} min={0} max={100} step={0.5} decimals={1} suffix="Mbps" onChange={(v) => set('videoBitrate', Math.round(v * 1000))} />
-                </>
-              )}
-              {form.rateMode === 'filesize' && (
-                <>
-                  <ui.FieldLabel>目标文件体积</ui.FieldLabel>
-                  <ui.NumberField value={form.targetFileSizeMb || 0} min={0} max={99999} step={1} decimals={0} suffix="MB" onChange={(v) => set('targetFileSizeMb', v)} />
-                </>
-              )}
-            </>
-          )}
-          {vMeta && vMeta.speed && (
-            <>
-              <ui.FieldLabel>编码速度</ui.FieldLabel>
-              <ui.ComboBox value={form.preset} options={X264_PRESET_OPTIONS} onChange={(v) => set('preset', v)} />
-            </>
-          )}
-          {vMeta && vMeta.tune && (
-            <>
-              <ui.FieldLabel>调优 (tune)</ui.FieldLabel>
-              <ui.ComboBox value={form.tune} options={TUNE_OPTIONS_FULL} onChange={(v) => set('tune', v)} />
-            </>
-          )}
-          {!isCopy && (
-            <>
-              <ui.FieldLabel>像素格式</ui.FieldLabel>
-              <ui.ComboBox value={form.pixelFormat} options={PIXEL_FORMAT_OPTIONS} onChange={(v) => set('pixelFormat', v)} />
-            </>
-          )}
-        </ui.FieldGrid>
-        {isCopy && <ui.HintLabel>视频流将直接复制、不重新编码；仅可更改封装格式与音频参数。</ui.HintLabel>}
+        <ui.AnimatedFieldGrid rows={videoFieldRows} />
+        <ui.AnimatedCollapse open={isCopy} className="se-panel-collapse">
+          <ui.HintLabel>视频流将直接复制、不重新编码；仅可更改封装格式与音频参数。</ui.HintLabel>
+        </ui.AnimatedCollapse>
       </ui.ParamGroup>
 
       <ui.ParamGroup title="封装格式">
@@ -817,11 +1121,9 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
       </ui.ParamGroup>
 
       <ui.ParamGroup title="分辨率与帧率">
-        {isCopy ? (
-          <ui.HintLabel>视频流复制模式下无法缩放或更改帧率，输出跟随源视频。</ui.HintLabel>
-        ) : (
+        <ui.AnimatedCollapse open={!isCopy} className="se-panel-collapse">
           <ui.FieldGrid>
-            <ui.FieldLabel>分辨率 (宽×高)</ui.FieldLabel>
+            <ui.FieldLabel>分辨率 (长×宽)</ui.FieldLabel>
             <div className="se-res-row">
               <ui.IntField value={form.scaleW} min={0} max={8192} suffix="px" onChange={(v) => set('scaleW', v)} />
               <span className="se-x">×</span>
@@ -830,34 +1132,23 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
             <ui.FieldLabel>帧率</ui.FieldLabel>
             <ui.NumberField value={form.fps} min={0} max={120} step={1} decimals={0} suffix="fps" onChange={(v) => set('fps', v)} />
           </ui.FieldGrid>
-        )}
+        </ui.AnimatedCollapse>
+        <ui.AnimatedCollapse open={isCopy} className="se-panel-collapse">
+          <ui.HintLabel>视频流复制模式下无法缩放或更改帧率，输出跟随源视频。</ui.HintLabel>
+        </ui.AnimatedCollapse>
       </ui.ParamGroup>
 
       <ui.ParamGroup title="音频">
-        {isGif ? (
+        <ui.AnimatedCollapse open={!isGif} className="se-panel-collapse">
+          <ui.AnimatedFieldGrid rows={audioFieldRows} />
+        </ui.AnimatedCollapse>
+        <ui.AnimatedCollapse open={isGif} className="se-panel-collapse">
           <ui.HintLabel>GIF 不含音频轨，音频设置将被忽略。</ui.HintLabel>
-        ) : (
-          <ui.FieldGrid>
-            <ui.FieldLabel>音频编码器</ui.FieldLabel>
-            <ui.ComboBox value={form.audioCodec} options={audioOptions} onChange={(v) => set('audioCodec', v)} />
-            {form.audioCodec === 'aac' && (
-              <>
-                <ui.FieldLabel>AAC 规格</ui.FieldLabel>
-                <ui.ComboBox value={form.audioProfile} options={AUDIO_PROFILE_OPTIONS} onChange={(v) => set('audioProfile', v)} />
-              </>
-            )}
-            <ui.FieldLabel>音频码率</ui.FieldLabel>
-            <ui.NumberField value={form.audioBitrate} min={0} max={640} step={8} decimals={0} suffix="kbps" disabled={isAudioCopy} onChange={(v) => set('audioBitrate', v)} />
-            <ui.FieldLabel>采样率</ui.FieldLabel>
-            <ui.ComboBox value={form.audioSampleRate} options={SAMPLE_RATE_OPTIONS} onChange={(v) => set('audioSampleRate', v)} disabled={isAudioCopy} />
-            <ui.FieldLabel>声道</ui.FieldLabel>
-            <ui.ComboBox value={form.audioChannels} options={CHANNEL_OPTIONS} onChange={(v) => set('audioChannels', v)} disabled={isAudioCopy} />
-          </ui.FieldGrid>
-        )}
+        </ui.AnimatedCollapse>
       </ui.ParamGroup>
 
       <ui.ParamGroup title="后期处理">
-        {!isCopy && (
+        <ui.AnimatedCollapse open={!isCopy} className="se-panel-collapse">
           <ui.FieldGrid>
             <ui.FieldLabel>锐化</ui.FieldLabel>
             <ui.ComboBox value={form.unsharp} options={UNSHARP_OPTIONS} onChange={(v) => set('unsharp', v)} />
@@ -866,9 +1157,24 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
             <ui.FieldLabel>风格</ui.FieldLabel>
             <ui.ComboBox value={form.style} options={TUNE_OPTIONS} onChange={(v) => set('style', v)} />
           </ui.FieldGrid>
-        )}
-        {isCopy && <ui.HintLabel>视频流复制模式下滤镜（锐化 / 降噪 / 风格）不可用。</ui.HintLabel>}
+        </ui.AnimatedCollapse>
+        <ui.AnimatedCollapse open={isCopy} className="se-panel-collapse">
+          <ui.HintLabel>视频流复制模式下滤镜（锐化 / 降噪 / 风格）不可用。</ui.HintLabel>
+        </ui.AnimatedCollapse>
         <ui.Checkbox checked={form.loudnorm} onChange={(v) => set('loudnorm', v)}>启用音频标准化</ui.Checkbox>
+      </ui.ParamGroup>
+
+      <ui.ParamGroup title="任务设置">
+        <ui.Checkbox
+          checked={!!form.twoPass}
+          disabled={!canUseTwoPass(form.videoCodec, form.rateMode)}
+          onChange={(v) => set('twoPass', v)}
+        >
+          启用 2-pass 编码（固定码率 / 目标体积）
+        </ui.Checkbox>
+        <ui.Checkbox checked={form.previewDuringEncode} onChange={(v) => set('previewDuringEncode', v)}>
+          编码时跟随当前素材
+        </ui.Checkbox>
       </ui.ParamGroup>
     </>
   );
@@ -876,10 +1182,71 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
 
 import { useFileList } from '../lib/fileListContext';
 import { useColumnLayout } from '../lib/columnLayoutContext';
-import { IconClose, IconCheckShield, IconCropClear, IconPlayAll, IconPlaySelected, IconStop } from './icons';
+import { IconClose, IconCheckShield, IconCopy, IconCropClear, IconFolder, IconLock, IconPlayAll, IconPlaySelected, IconStop, IconTerminal, IconUnlock, IconVideo } from './icons';
 
 /* 共享：活动任务进度路由（单任务模型） */
 let activeTaskId = 0;
+
+function TaskFailureDialog({ message, logs, onClose }: { message: string; logs: TaskLogEvent[]; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const report = [
+    ...logs.map((event) => event.kind === 'file_start'
+      ? `[${event.queueIndex ?? 1}/${event.queueTotal ?? 1}] ${event.filename || event.sourcePath || ''}`
+      : event.message),
+    message,
+  ].filter(Boolean).join('\n');
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  const copyReport = async () => {
+    try {
+      await navigator.clipboard.writeText(report);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = report;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  };
+
+  return (
+    <div className="se-dialog-backdrop" onClick={onClose}>
+      <div
+        className="se-dialog se-task-error-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="se-task-error-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="se-dialog-head">
+          <span className="se-dialog-title" id="se-task-error-title">任务失败</span>
+          <button type="button" className="se-dialog-close" onClick={onClose} title="关闭">
+            <IconClose size={14} />
+          </button>
+        </div>
+        <div className="se-dialog-body">
+          <pre className="se-task-error-log" tabIndex={0}>{report}</pre>
+        </div>
+        <div className="se-dialog-foot">
+          <ui.Button icon={<IconCopy size={14} />} onClick={copyReport}>{copied ? '已复制' : '复制日志'}</ui.Button>
+          <ui.Button primary onClick={onClose}>关闭</ui.Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function formatEta(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—';
@@ -892,19 +1259,25 @@ function formatEta(ms: number): string {
   return `${h}:${String(m % 60).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function useTaskRunner() {
-  const [logs, setLogs] = useState<string[]>([]);
+function useTaskRunnerState() {
+  const [logs, setLogs] = useState<TaskLogEvent[]>([]);
   const [progress, setProgress] = useState(0);
   const [detail, setDetail] = useState('尚未开始任务');
   const [eta, setEta] = useState('—');
   const [pass, setPass] = useState(0);
   const [fail, setFail] = useState(0);
   const [running, setRunning] = useState(false);
+  const [progressSource, setProgressSource] = useState('');
+  const [progressTime, setProgressTime] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [outputPaths, setOutputPaths] = useState<string[]>([]);
   const runningRef = useRef(false);
   const taskId = useRef(0);
   const startedAt = useRef(0);
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
+    let disposed = false;
     let un1: (() => void) | null = null;
     let un2: (() => void) | null = null;
     Promise.all([
@@ -912,6 +1285,10 @@ function useTaskRunner() {
         if (!runningRef.current) return;
         setProgress(p.percent);
         setDetail(p.detail);
+        if (p.source_path) {
+          setProgressSource(p.source_path);
+          setProgressTime(p.time_seconds ?? 0);
+        }
         if (p.percent > 1 && p.percent < 100 && startedAt.current > 0) {
           const elapsed = Date.now() - startedAt.current;
           const total = elapsed / (p.percent / 100);
@@ -922,54 +1299,137 @@ function useTaskRunner() {
         if (!runningRef.current) return;
         setLogs((prev) => [...prev.slice(-400), line]);
       }),
-    ]).then(([a, b]) => { un1 = a; un2 = b; });
-    return () => { un1?.(); un2?.(); };
+    ]).then(([a, b]) => {
+      if (disposed) {
+        a();
+        b();
+        return;
+      }
+      un1 = a;
+      un2 = b;
+    });
+    return () => {
+      disposed = true;
+      un1?.();
+      un2?.();
+    };
   }, []);
 
-  const start = useCallback(async (fn: () => Promise<void>) => {
+  const start = useCallback(async <T,>(fn: () => Promise<T>): Promise<TaskRunOutcome<T>> => {
+    if (runningRef.current) {
+      return { status: 'failed', error: '当前已有任务正在执行' };
+    }
     const id = ++activeTaskId;
     taskId.current = id;
     runningRef.current = true;
+    cancelledRef.current = false;
     startedAt.current = Date.now();
     setRunning(true);
     setLogs([]);
     setProgress(0);
+    setProgressSource('');
+    setProgressTime(0);
     setDetail('正在准备...');
     setEta('—');
     setPass(0);
     setFail(0);
+    setError(null);
+    setOutputPaths([]);
     try {
-      await fn();
+      const value = await fn();
       if (taskId.current === id) {
-        setProgress(100);
-        setDetail('任务结束');
-        setEta('0s');
+        if (cancelledRef.current) {
+          setDetail('任务已取消');
+          setEta('—');
+          return { status: 'canceled' };
+        } else {
+          setProgress(100);
+          setDetail('任务结束');
+          setEta('0s');
+          return { status: 'completed', value };
+        }
       }
+      return { status: 'canceled' };
     } catch (e: any) {
       if (taskId.current === id) {
-        setDetail(`任务失败: ${String(e?.message || e)}`);
-        setEta('—');
+        if (cancelledRef.current) {
+          setDetail('任务已取消');
+          setEta('—');
+          return { status: 'canceled' };
+        } else {
+          const message = String(e?.message || e);
+          setDetail('任务失败');
+          setEta('—');
+          setError(message);
+          setLogs((prev) => [...prev.slice(-400), normalizeTaskLogEvent(`[FAIL] ${message.split('\n')[0]}`)]);
+          return { status: 'failed', error: message };
+        }
       }
+      return { status: 'failed', error: String(e?.message || e) };
     } finally {
       if (taskId.current === id) {
+        setEta((current) => cancelledRef.current ? '—' : current);
         runningRef.current = false;
         setRunning(false);
       }
     }
   }, []);
 
-  const appendLog = useCallback((line: string) => {
-    setLogs((prev) => [...prev.slice(-400), line]);
+  const appendLog = useCallback((line: string | TaskLogEvent) => {
+    setLogs((prev) => [...prev.slice(-400), normalizeTaskLogEvent(line)]);
   }, []);
 
+  const cancel = useCallback(async () => {
+    if (!runningRef.current || cancelledRef.current) return;
+    cancelledRef.current = true;
+    setDetail('正在取消...');
+    try {
+      const cancelled = await cancelFfmpeg();
+      if (!cancelled) setDetail('正在等待当前步骤结束...');
+    } catch (e: any) {
+      cancelledRef.current = false;
+      const message = `取消失败: ${String(e?.message || e)}`;
+      setDetail(message);
+      setError(message);
+      setLogs((prev) => [...prev.slice(-400), normalizeTaskLogEvent(`[FAIL] ${message}`)]);
+    }
+  }, []);
+
+  const isCancelled = useCallback(() => cancelledRef.current, []);
+  const openOutputs = useCallback(async () => {
+    if (outputPaths.length === 0) return;
+    await openOutputDirectory(outputPaths[0]);
+  }, [outputPaths]);
+
   return {
-    logs, progress, detail, eta, pass, fail, running,
-    start, appendLog, setPass, setFail, setDetail, setProgress, setEta,
+    logs, progress, detail, eta, pass, fail, running, progressSource, progressTime, error, outputPaths,
+    start, cancel, isCancelled, appendLog, setPass, setFail, setDetail, setProgress, setEta,
+    setOutputPaths, openOutputs,
+    clearError: () => setError(null),
   };
 }
 
+type TaskRunner = ReturnType<typeof useTaskRunnerState>;
+
+const TaskRunnerContext = React.createContext<TaskRunner | null>(null);
+
+export function TaskRunnerProvider({ children }: { children: ReactNode }) {
+  const runner = useTaskRunnerState();
+  return (
+    <TaskRunnerContext.Provider value={runner}>
+      {children}
+    </TaskRunnerContext.Provider>
+  );
+}
+
+export function useTaskRunner() {
+  const runner = React.useContext(TaskRunnerContext);
+  if (!runner) throw new Error('useTaskRunner 必须在 TaskRunnerProvider 内使用');
+  return runner;
+}
+
 /** 工具工作区：参数列（滚动区 + 固定操作底栏）+ 可拖拽分隔 + 结果列（固定进度头 + 滚动内容） */
-function ToolWorkspace({ params, actions, result, resultHeader, resultTitle }: {
+export function ToolWorkspace({ params, actions, result, resultHeader, resultTitle, taskFailure }: {
   params: ReactNode;
   /** 参数列底部固定的操作区（处理按钮），不随滚动消失 */
   actions?: ReactNode;
@@ -978,12 +1438,58 @@ function ToolWorkspace({ params, actions, result, resultHeader, resultTitle }: {
   resultHeader?: ReactNode;
   /** 结果列标题，与左列顶部标题同高同位、无分隔线 */
   resultTitle?: ReactNode;
+  taskFailure?: { message: string; logs: TaskLogEvent[]; onClose: () => void };
 }) {
   const { wParams, resizeParams } = useColumnLayout();
+  const task = useTaskRunner();
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    if (task.running) element.setAttribute('inert', '');
+    else element.removeAttribute('inert');
+  }, [task.running]);
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const hasScrollbar = element.scrollHeight > element.clientHeight + 1;
+      const scrollbarWidth = Math.max(0, Math.min(12, element.offsetWidth - element.clientWidth));
+      element.classList.toggle('has-y-scrollbar', hasScrollbar && scrollbarWidth > 0);
+      element.style.setProperty('--se-scrollbar-width', `${scrollbarWidth}px`);
+    };
+    const schedule = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+    const resizeObserver = new ResizeObserver(schedule);
+    resizeObserver.observe(element);
+    const mutationObserver = new MutationObserver((mutations) => {
+      if (mutations.some((mutation) => mutation.target !== element)) schedule();
+    });
+    mutationObserver.observe(element, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'style'],
+    });
+    measure();
+    return () => {
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, []);
+
   return (
     <div className="se-tab-workspace">
       <div className="se-left" style={{ flex: `0 0 ${wParams}px`, width: wParams, minWidth: wParams }}>
-        <div className="se-params-scroll">{params}</div>
+        <div ref={scrollRef} className="se-params-scroll">{params}</div>
         {actions && <div className="se-params-foot">{actions}</div>}
       </div>
       <ResizeHandle onDelta={resizeParams} />
@@ -991,15 +1497,101 @@ function ToolWorkspace({ params, actions, result, resultHeader, resultTitle }: {
         <div className="se-result-scroll">
           {(resultTitle || resultHeader) && (
             <div className="se-result-head">
-              {resultTitle ? <div className="se-result-title">{resultTitle}</div> : null}
+              {resultTitle ? <div className="se-result-title se-panel-head">{resultTitle}</div> : null}
               {resultHeader}
             </div>
           )}
           {result}
         </div>
       </div>
+      {taskFailure && <TaskFailureDialog {...taskFailure} />}
     </div>
   );
+}
+
+export type ResultView = 'preview' | 'logs';
+
+export function useResultView(running: boolean, previewDuringTask = false): [ResultView, React.Dispatch<React.SetStateAction<ResultView>>] {
+  const [view, setView] = useState<ResultView>('preview');
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (running && !wasRunning.current) setView(previewDuringTask ? 'preview' : 'logs');
+    wasRunning.current = running;
+  }, [previewDuringTask, running]);
+  return [view, setView];
+}
+
+export function ResultViewTitle({ value, logs, running }: {
+  value: ResultView;
+  logs: number;
+  running: boolean;
+}) {
+  const title = value === 'preview'
+    ? '播放器'
+    : running
+      ? '日志 · 运行中'
+      : logs > 0
+        ? `日志 · ${logs}`
+        : '日志';
+
+  return <span className="se-panel-title">{title}</span>;
+}
+
+function ResultViewSwitch({ value, onChange }: {
+  value: ResultView;
+  onChange: (view: ResultView) => void;
+}) {
+  return (
+    <div className="se-result-view-actions" role="tablist" aria-label="结果视图">
+      <button type="button" role="tab" title="播放器" aria-label="播放器" aria-selected={value === 'preview'} className={`se-result-view-tab${value === 'preview' ? ' active' : ''}`} onClick={() => onChange('preview')}>
+        <IconVideo size={16} />
+      </button>
+      <button type="button" role="tab" title="日志" aria-label="日志" aria-selected={value === 'logs'} className={`se-result-view-tab${value === 'logs' ? ' active' : ''}`} onClick={() => onChange('logs')}>
+        <IconTerminal size={16} />
+      </button>
+    </div>
+  );
+}
+
+export function ResultViewProgress({ value, onChange, progress, detail, eta, pass, fail, running }: {
+  value: ResultView;
+  onChange: (view: ResultView) => void;
+  progress: number;
+  detail?: string;
+  eta?: string;
+  pass?: number;
+  fail?: number;
+  running: boolean;
+}) {
+  return (
+    <div className="se-result-view-progress-row">
+      <ResultViewSwitch value={value} onChange={onChange} />
+      <ui.ProgressBar value={progress} detail={detail} eta={eta} pass={pass} fail={fail} running={running} />
+    </div>
+  );
+}
+
+export function ResultViewContent({ value, preview, logs }: {
+  value: ResultView;
+  preview: ReactNode;
+  logs: TaskLogEvent[];
+}) {
+  return (
+    <>
+      <div className={`se-result-view-panel${value === 'preview' ? '' : ' is-hidden'}`}>{preview}</div>
+      {value === 'logs' && <ui.LogView lines={logs} />}
+    </>
+  );
+}
+
+async function cropForTarget(
+  path: string,
+  crop: CropRect | null,
+  sourceDimensions: MediaDimensions | null,
+): Promise<CropRect | null> {
+  if (!crop || !sourceDimensions) return null;
+  const target = await getVideoInfo(path);
+  return remapCrop(crop, sourceDimensions, target);
 }
 
 /** 处理选中 / 批量处理 —— 两行整齐布局 + 图标 */
@@ -1010,20 +1602,27 @@ function ProcessButtons({
   onSelected,
   onAll,
   onStop,
+  onOpenOutput,
+  disabled = false,
+  disabledTitle,
 }: {
   running: boolean;
   selectedCount: number;
   totalCount: number;
   onSelected: () => void;
   onAll: () => void;
-  onStop?: () => void;
+  onStop?: () => void | Promise<void>;
+  onOpenOutput?: () => void | Promise<void>;
+  disabled?: boolean;
+  disabledTitle?: string;
 }) {
   return (
     <div className="se-process-btns">
       <ui.Button
         primary
         className="se-process-main"
-        disabled={running || selectedCount === 0}
+        disabled={running || disabled || selectedCount === 0}
+        title={disabled ? disabledTitle : undefined}
         onClick={onSelected}
         icon={<IconPlaySelected size={15} />}
       >
@@ -1032,13 +1631,14 @@ function ProcessButtons({
       <ui.Button
         primary
         className="se-process-main"
-        disabled={running || totalCount === 0}
+        disabled={running || disabled || totalCount === 0}
+        title={disabled ? disabledTitle : undefined}
         onClick={onAll}
         icon={<IconPlayAll size={15} />}
       >
         批量全部
       </ui.Button>
-      {onStop && (
+      {onStop && running && (
         <ui.Button
           className="se-process-stop"
           disabled={!running}
@@ -1048,12 +1648,26 @@ function ProcessButtons({
           停止
         </ui.Button>
       )}
+      {onStop && !running && onOpenOutput && (
+        <ui.Button
+          className="se-process-stop"
+          onClick={onOpenOutput}
+          icon={<IconFolder size={15} />}
+        >
+          打开输出目录
+        </ui.Button>
+      )}
+      {onStop && !running && !onOpenOutput && (
+        <ui.Button className="se-process-stop" disabled icon={<IconStop size={15} />}>
+          停止
+        </ui.Button>
+      )}
     </div>
   );
 }
 
 /** 预览路径：同步 media URL + 可选 probe（防抖、可取消） */
-function useActiveMedia(activePath: string | null, probe = true) {
+export function useActiveMedia(activePath: string | null, probe = true) {
   const [src, setSrc] = useState('');
   const [info, setInfo] = useState<VideoInfo | null>(null);
   const [path, setPath] = useState('');
@@ -1069,6 +1683,8 @@ function useActiveMedia(activePath: string | null, probe = true) {
       return;
     }
     setPath(p);
+    setInfo(null);
+    setWarn('');
     // 立即切换预览 URL（asset 协议，不读整文件）
     setSrc(mediaPreviewUrl(p));
     if (!probe) return;
@@ -1098,19 +1714,71 @@ function onlyFiles(paths: string[]) {
   return paths.filter((p) => !p.endsWith('/') && !p.endsWith('\\'));
 }
 
+function requireAgentPreset(
+  presets: Preset[],
+  presetId: string,
+  label: string,
+  expectedRevision = 0,
+  expectedType?: Preset['type'],
+): Preset {
+  const preset = presets.find((item) => item.id === presetId);
+  if (!preset) throw new Error(`${label}预设不存在或已被删除`);
+  if (expectedType && preset.type !== expectedType) {
+    throw new Error(`${label}任务收到错误类型的预设快照`);
+  }
+  if (expectedRevision > 0 && (preset.revision ?? 1) !== expectedRevision) {
+    throw new Error(`${label}任务的预设快照版本不一致，请重新发起任务`);
+  }
+  return preset;
+}
+
+function fileLogEvent(
+  kind: 'file_start' | 'file_end',
+  path: string,
+  index: number,
+  total: number,
+  tone: TaskLogEvent['tone'],
+  message: string,
+): TaskLogEvent {
+  return {
+    kind,
+    queueIndex: index + 1,
+    queueTotal: total,
+    filename: path.split(/[/\\]/).filter(Boolean).pop() || path,
+    sourcePath: path,
+    tone,
+    message,
+  };
+}
+
+function useOutputFormState() {
+  const [output, setOutput] = useState<OutputFormState>(() => ({ ...DEFAULT_OUTPUT_FORM }));
+  const [presetName, setPresetName] = useState('');
+  const setOutputField = useCallback((key: keyof OutputFormState, value: string) => {
+    setOutput((current) => ({ ...current, [key]: value }));
+  }, []);
+  const applyOutput = useCallback((params: Partial<OutputFormState>, nextPresetName = '') => {
+    setPresetName(nextPresetName);
+    const hasOutputSettings = ['outputMode', 'outputNameTemplate', 'outputSubdirectory', 'outputDirectory']
+      .some((key) => Object.prototype.hasOwnProperty.call(params, key));
+    if (nextPresetName || hasOutputSettings) setOutput(normalizeOutputForm(params));
+  }, []);
+  return { output, presetName, setOutputField, applyOutput };
+}
+
 /* ========================= 转码 ========================= */
 
 const UNSHARP_OPTIONS = [
-  { label: '强度0', value: 0 },
-  { label: '强度0.5', value: 1 },
-  { label: '强度0.8 (默认)', value: 2 },
-  { label: '强度1.2', value: 3 },
-  { label: '强度1.5', value: 4 },
+  { label: '强度 0', value: 0 },
+  { label: '强度 0.5', value: 1 },
+  { label: '强度 0.8', value: 2, tags: ['默认'] },
+  { label: '强度 1.2', value: 3 },
+  { label: '强度 1.5', value: 4 },
 ];
 
 const DENOISE_OPTIONS = [
   { label: '无降噪', value: 0 },
-  { label: '轻度降噪 (默认)', value: 1 },
+  { label: '轻度降噪', value: 1, tags: ['默认'] },
   { label: '中度降噪+去块', value: 2 },
   { label: '强力降噪+去块', value: 3 },
 ];
@@ -1118,19 +1786,25 @@ const DENOISE_OPTIONS = [
 const TUNE_OPTIONS = [
   { label: '无风格', value: 0 },
   { label: '实拍视频', value: 1 },
-  { label: '动画类 (默认)', value: 2 },
+  { label: '动画类', value: 2, tags: ['默认'] },
 ];
 
 export function EncodeTab() {
   const fl = useFileList();
   const t = useTaskRunner();
   const [form, setForm] = useState(() => ({ ...DEFAULT_ENCODE_FORM }));
+  const [resultView, setResultView] = useResultView(t.running, form.previewDuringEncode);
+  const [presetName, setPresetName] = useState('');
+  const previewPath = t.progressSource;
+  const previewName = previewPath.split(/[/\\]/).filter(Boolean).pop() ?? '';
+  const media = useActiveMedia((form.previewDuringEncode && previewPath) || fl.activePath, false);
 
   // 面板内联控件直接改 form（无需先建预设）
   const setField = (k: string, v: any) => setForm((f) => ({ ...f, [k]: v }));
 
   // 套用预设时，把其参数写入当前表单；空白项（预设里未选择的）跳过，保留运行时默认值
-  const applyEncode = (params: any) => {
+  const applyEncode = (params: any, nextPresetName = '') => {
+    setPresetName(nextPresetName);
     setForm((prev) => {
       const merged: any = { ...prev };
       for (const [k, v] of Object.entries(params)) {
@@ -1141,10 +1815,24 @@ export function EncodeTab() {
     });
   };
 
+  const encodeLabels = buildEncodeNameLabels({
+    scaleW: form.scaleW,
+    scaleH: form.scaleH,
+    keepRes: form.keepRes,
+    fps: form.fps,
+    videoCodec: form.videoCodec,
+    rateMode: form.rateMode,
+    videoBitrate: form.videoBitrate,
+    crf: form.crf,
+    targetFileSizeMb: form.targetFileSizeMb,
+  });
+
   const runPaths = (targets: string[]) => t.start(async () => {
     try {
-      await transcode({
-        paths: targets,
+      const files = await fl.resolveLeafPaths(targets);
+      if (files.length === 0) throw new Error('没有可处理的素材文件');
+      const outputs = await transcode({
+        paths: files,
         videoCodec: form.videoCodec,
         videoProfile: form.videoProfile,
         crf: form.crf,
@@ -1169,8 +1857,12 @@ export function EncodeTab() {
         keepRes: form.keepRes,
         rateMode: form.rateMode || 'crf',
         targetFileSizeMb: form.targetFileSizeMb || 0,
+        twoPass: !!form.twoPass,
+        // 命名标签由后端按每文件实际参数探测/生成，前端标签仅用于预览
+        outputOptions: toOutputSettings(form, presetName),
       });
-      t.setPass(targets.length);
+      t.setOutputPaths(outputs);
+      t.setPass(files.length);
       t.setFail(0);
     } catch (e) {
       t.setFail(targets.length);
@@ -1178,27 +1870,110 @@ export function EncodeTab() {
     }
   });
 
+  useEffect(() => registerAgentTaskHandler('encode', (agentTask) => t.start(async (): Promise<AgentTaskExecutionResult> => {
+    const preset = requireAgentPreset(
+      agentTask.presetSnapshots,
+      agentTask.presetId,
+      '转码',
+      agentTask.presetRevision,
+      'encode',
+    );
+    const agentForm: any = { ...DEFAULT_ENCODE_FORM, ...preset.params };
+    const files = await fl.resolveLeafPaths(agentTask.inputPaths);
+    if (files.length === 0) throw new Error('没有可处理的素材文件');
+    const outputs = await transcode({
+      paths: files,
+      videoCodec: agentForm.videoCodec,
+      videoProfile: agentForm.videoProfile,
+      crf: agentForm.crf,
+      speedPreset: agentForm.preset,
+      tune: agentForm.tune,
+      style: agentForm.style,
+      pixelFormat: agentForm.pixelFormat,
+      container: agentForm.container,
+      scaleW: agentForm.scaleW,
+      scaleH: agentForm.scaleH,
+      fps: agentForm.fps,
+      videoBitrate: agentForm.videoBitrate,
+      audioCodec: agentForm.audioCodec,
+      audioProfile: agentForm.audioProfile,
+      audioBitrate: agentForm.audioBitrate,
+      audioSampleRate: agentForm.audioSampleRate,
+      audioChannels: agentForm.audioChannels,
+      unsharp: agentForm.unsharp,
+      denoise: agentForm.denoise,
+      loudnorm: agentForm.loudnorm,
+      audioOnly: agentForm.audioOnly,
+      keepRes: agentForm.keepRes,
+      rateMode: agentForm.rateMode || 'crf',
+      targetFileSizeMb: agentForm.targetFileSizeMb || 0,
+      twoPass: !!agentForm.twoPass,
+      outputOptions: {
+        ...toOutputSettings(agentForm, preset.name),
+        uniqueName: true,
+      },
+    });
+    t.setOutputPaths(outputs);
+    t.setPass(files.length);
+    t.setFail(0);
+    return { outputPaths: outputs, detail: `转码完成 ${outputs.length} 个文件` };
+  })), [fl.resolveLeafPaths, t.setFail, t.setOutputPaths, t.setPass, t.start]);
+
   return (
     <ToolWorkspace
+      taskFailure={t.error ? { message: t.error, logs: t.logs, onClose: t.clearError } : undefined}
       params={
         <>
           <PresetManager type="encode" onApply={applyEncode} currentParams={form} renderBuilder={(ctx) => <PresetBuilder ctx={ctx} />} />
           <EncodeInlineForm form={form} set={setField} />
+          <OutputLocationGroup
+            value={form}
+            presetName={presetName}
+            extension={form.container || 'mp4'}
+            defaultSuffix="_se"
+            encodeLabels={encodeLabels}
+            onChange={setField}
+            disabled={t.running}
+          />
         </>
       }
       actions={
         <ProcessButtons
           running={t.running}
-          selectedCount={fl.selectedPaths.length}
-          totalCount={fl.paths.length}
+          selectedCount={fl.selectedCount}
+          totalCount={fl.totalCount}
           onSelected={() => runPaths(fl.selectedPaths)}
-          onAll={() => runPaths(fl.paths)}
-          onStop={() => t.setDetail('已取消')}
+          onAll={() => runPaths(fl.allPaths)}
+          onStop={t.cancel}
+          onOpenOutput={t.outputPaths.length > 0 ? t.openOutputs : undefined}
         />
       }
-      resultHeader={<ui.ProgressBar value={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} />}
-      resultTitle={<ui.SectionTitle>实时日志</ui.SectionTitle>}
-      result={<ui.LogView lines={t.logs} />}
+      resultHeader={<ResultViewProgress value={resultView} onChange={setResultView} progress={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} running={t.running} />}
+      resultTitle={<ResultViewTitle value={resultView} logs={t.logs.length} running={t.running} />}
+      result={(
+        <ResultViewContent
+          value={resultView}
+          logs={t.logs}
+          preview={(
+            <div className="se-encode-preview">
+              {previewName && (
+                <div className="se-encode-preview-meta">
+                  <span className="se-encode-preview-file" title={previewPath}>{previewName}</span>
+                  <span className="se-encode-preview-time">{formatTime(t.progressTime)}</span>
+                </div>
+              )}
+              <VideoPlayer
+                src={media.src}
+                filePath={media.path}
+                cropEnabled={false}
+                monitorMode={t.running && form.previewDuringEncode}
+                controlsDisabled={t.running}
+                followTime={t.progressTime}
+              />
+            </div>
+          )}
+        />
+      )}
     />
   );
 }
@@ -1208,6 +1983,9 @@ export function EncodeTab() {
 export function MixTab() {
   const fl = useFileList();
   const t = useTaskRunner();
+  const media = useActiveMedia(fl.activePath, false);
+  const [resultView, setResultView] = useResultView(t.running);
+  const { output, presetName, setOutputField, applyOutput } = useOutputFormState();
   const [lnOn, setLnOn] = useState(true);
   const [tpOn, setTpOn] = useState(true);
   const [lnI, setLnI] = useState(-24.0);
@@ -1216,7 +1994,7 @@ export function MixTab() {
   const [cpTh, setCpTh] = useState(-27.0);
   const [cpGain, setCpGain] = useState(5.0);
 
-  const applyMix = (params: any) => {
+  const applyMix = (params: any, nextPresetName = '') => {
     if (params.lnOn != null) setLnOn(params.lnOn);
     if (params.lnI != null) setLnI(params.lnI);
     if (params.lnTp != null) setLnTp(params.lnTp);
@@ -1224,12 +2002,16 @@ export function MixTab() {
     if (params.tpOn != null) setTpOn(params.tpOn);
     if (params.cpTh != null) setCpTh(params.cpTh);
     if (params.cpGain != null) setCpGain(params.cpGain);
+    applyOutput(params, nextPresetName);
   };
 
   const runPaths = (targets: string[]) => t.start(async () => {
     try {
-      await mixAudio(targets, lnI, lnTp, lnLra, cpTh, cpGain, lnOn, tpOn);
-      t.setPass(targets.length);
+      const files = await fl.resolveLeafPaths(targets);
+      if (files.length === 0) throw new Error('没有可处理的素材文件');
+      const outputs = await mixAudio(files, lnI, lnTp, lnLra, cpTh, cpGain, lnOn, tpOn, toOutputSettings(output, presetName));
+      t.setOutputPaths(outputs);
+      t.setPass(files.length);
       t.setFail(0);
     } catch (e) {
       t.setFail(targets.length);
@@ -1237,22 +2019,51 @@ export function MixTab() {
     }
   });
 
+  useEffect(() => registerAgentTaskHandler('mix', (agentTask) => t.start(async (): Promise<AgentTaskExecutionResult> => {
+    const preset = requireAgentPreset(
+      agentTask.presetSnapshots,
+      agentTask.presetId,
+      '混音',
+      agentTask.presetRevision,
+      'mix',
+    );
+    const params: any = { ...DEFAULT_OUTPUT_FORM, ...preset.params };
+    const files = await fl.resolveLeafPaths(agentTask.inputPaths);
+    if (files.length === 0) throw new Error('没有可处理的素材文件');
+    const outputs = await mixAudio(
+      files,
+      params.lnI ?? -24,
+      params.lnTp ?? -2,
+      params.lnLra ?? 7,
+      params.cpTh ?? -27,
+      params.cpGain ?? 5,
+      params.lnOn !== false,
+      params.tpOn !== false,
+      { ...toOutputSettings(params, preset.name), uniqueName: true },
+    );
+    t.setOutputPaths(outputs);
+    t.setPass(files.length);
+    t.setFail(0);
+    return { outputPaths: outputs, detail: `混音完成 ${outputs.length} 个文件` };
+  })), [fl.resolveLeafPaths, t.setFail, t.setOutputPaths, t.setPass, t.start]);
+
   return (
     <ToolWorkspace
+      taskFailure={t.error ? { message: t.error, logs: t.logs, onClose: t.clearError } : undefined}
       params={
         <>
-          <PresetManager type="mix" onApply={applyMix} initialValues={{ lnOn, lnI, lnTp, lnLra, tpOn, cpTh, cpGain }} currentParams={{ lnOn, lnI, lnTp, lnLra, tpOn, cpTh, cpGain }} />
+          <PresetManager type="mix" onApply={applyMix} initialValues={{ lnOn, lnI, lnTp, lnLra, tpOn, cpTh, cpGain, ...output }} currentParams={{ lnOn, lnI, lnTp, lnLra, tpOn, cpTh, cpGain, ...output }} />
           <ui.ParamGroup
             title="响度标准化 (EBU R128)"
             aside={<ui.Checkbox checked={lnOn} onChange={setLnOn} disabled={t.running}>{''}</ui.Checkbox>}
           >
             <ui.FieldGrid>
               <ui.FieldLabel>目标响度 (I)</ui.FieldLabel>
-              <ui.NumberField value={lnI} min={-70} max={-5} step={1} suffix="LUFS" disabled={!lnOn || t.running} onChange={setLnI} />
+              <ui.NumberField value={lnI} min={-70} max={-5} step={1} suffix="LUFS" disabled={t.running || isPresetUiFieldDisabled('mix', 'lnI', { lnOn, tpOn })} onChange={setLnI} />
               <ui.FieldLabel>真峰限制 (TP)</ui.FieldLabel>
-              <ui.NumberField value={lnTp} min={-9} max={0} step={0.5} suffix="dBTP" disabled={!lnOn || t.running} onChange={setLnTp} />
+              <ui.NumberField value={lnTp} min={-9} max={0} step={0.5} suffix="dBTP" disabled={t.running || isPresetUiFieldDisabled('mix', 'lnTp', { lnOn, tpOn })} onChange={setLnTp} />
               <ui.FieldLabel>响度范围 (LRA)</ui.FieldLabel>
-              <ui.NumberField value={lnLra} min={1} max={50} step={1} suffix="LU" disabled={!lnOn || t.running} onChange={setLnLra} />
+              <ui.NumberField value={lnLra} min={1} max={50} step={1} suffix="LU" disabled={t.running || isPresetUiFieldDisabled('mix', 'lnLra', { lnOn, tpOn })} onChange={setLnLra} />
             </ui.FieldGrid>
           </ui.ParamGroup>
           <ui.ParamGroup
@@ -1261,25 +2072,28 @@ export function MixTab() {
           >
             <ui.FieldGrid>
               <ui.FieldLabel>压缩阈值</ui.FieldLabel>
-              <ui.NumberField value={cpTh} min={-80} max={0} step={1} suffix="dB" disabled={!tpOn || t.running} onChange={setCpTh} />
+              <ui.NumberField value={cpTh} min={-80} max={0} step={1} suffix="dB" disabled={t.running || isPresetUiFieldDisabled('mix', 'cpTh', { lnOn, tpOn })} onChange={setCpTh} />
               <ui.FieldLabel>补偿增益</ui.FieldLabel>
-              <ui.NumberField value={cpGain} min={-20} max={40} step={1} suffix="dB" disabled={!tpOn || t.running} onChange={setCpGain} />
+              <ui.NumberField value={cpGain} min={-20} max={40} step={1} suffix="dB" disabled={t.running || isPresetUiFieldDisabled('mix', 'cpGain', { lnOn, tpOn })} onChange={setCpGain} />
             </ui.FieldGrid>
           </ui.ParamGroup>
+          <OutputLocationGroup value={output} presetName={presetName} extension="mp4" defaultSuffix="_mix" onChange={setOutputField} disabled={t.running} />
         </>
       }
       actions={
         <ProcessButtons
           running={t.running}
-          selectedCount={fl.selectedPaths.length}
-          totalCount={fl.paths.length}
+          selectedCount={fl.selectedCount}
+          totalCount={fl.totalCount}
           onSelected={() => runPaths(fl.selectedPaths)}
-          onAll={() => runPaths(fl.paths)}
+          onAll={() => runPaths(fl.allPaths)}
+          onStop={t.cancel}
+          onOpenOutput={t.outputPaths.length > 0 ? t.openOutputs : undefined}
         />
       }
-      resultHeader={<ui.ProgressBar value={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} />}
-      resultTitle={<ui.SectionTitle>实时日志</ui.SectionTitle>}
-      result={<ui.LogView lines={t.logs} />}
+      resultHeader={<ResultViewProgress value={resultView} onChange={setResultView} progress={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} running={t.running} />}
+      resultTitle={<ResultViewTitle value={resultView} logs={t.logs.length} running={t.running} />}
+      result={<ResultViewContent value={resultView} logs={t.logs} preview={<VideoPlayer src={media.src} filePath={media.path} cropEnabled={false} controlsDisabled={t.running} />} />}
     />
   );
 }
@@ -1289,6 +2103,8 @@ export function MixTab() {
 export function CheckTab() {
   const fl = useFileList();
   const t = useTaskRunner();
+  const media = useActiveMedia(fl.activePath, false);
+  const [resultView, setResultView] = useResultView(t.running);
   const [fpsTol, setFpsTol] = useState(0.5);
   const [recursive, setRecursive] = useState(true);
   const [blackDetect, setBlackDetect] = useState(true);
@@ -1311,21 +2127,55 @@ export function CheckTab() {
     refEncRes: (refEnc.params?.scaleW && refEnc.params?.scaleH) ? `${refEnc.params.scaleW}×${refEnc.params.scaleH}` : '',
     refEncFps: refEnc.params?.fps || 0,
   } : {};
-  const hasRef = !!refEnc;
 
   const runPaths = (targets: string[]) => t.start(async () => {
+    const files = await fl.resolveLeafPaths(targets);
+    if (files.length === 0) throw new Error('没有可检测的素材文件');
     const expW = refEnc?.params?.scaleW || 0;
     const expH = refEnc?.params?.scaleH || 0;
     const expFps = refEnc?.params?.fps || 0;
     const expCodec = refEnc?.params?.videoCodec || '';
-    const r = await checkVideos(targets, fpsTol, recursive, blackDetect, expW, expH, expFps, expCodec);
+    const r = await checkVideos(files, fpsTol, recursive, blackDetect, expW, expH, expFps, expCodec);
     t.setPass(r.pass + r.pass_with_warnings);
     t.setFail(r.fail);
     t.setDetail(`通过 ${r.pass}，警告 ${r.pass_with_warnings}，失败 ${r.fail}`);
   });
 
+  useEffect(() => registerAgentTaskHandler('check', (agentTask) => t.start(async (): Promise<AgentTaskExecutionResult> => {
+    const preset = requireAgentPreset(
+      agentTask.presetSnapshots,
+      agentTask.presetId,
+      '检测',
+      agentTask.presetRevision,
+      'check',
+    );
+    const params: any = preset.params ?? {};
+    const referenceId = String(params.refEncPresetId || '');
+    const reference = referenceId
+      ? requireAgentPreset(agentTask.presetSnapshots, referenceId, '检测引用的转码', 0, 'encode')
+      : undefined;
+    const files = await fl.resolveLeafPaths(agentTask.inputPaths);
+    if (files.length === 0) throw new Error('没有可检测的素材文件');
+    const summary = await checkVideos(
+      files,
+      params.fpsTol ?? 0.5,
+      params.recursive !== false,
+      params.blackDetect !== false,
+      reference?.params.scaleW || 0,
+      reference?.params.scaleH || 0,
+      reference?.params.fps || 0,
+      reference?.params.videoCodec || '',
+    );
+    t.setPass(summary.pass + summary.pass_with_warnings);
+    t.setFail(summary.fail);
+    const detail = `通过 ${summary.pass}，警告 ${summary.pass_with_warnings}，失败 ${summary.fail}`;
+    t.setDetail(detail);
+    return { outputPaths: [], detail };
+  })), [fl.resolveLeafPaths, t.setDetail, t.setFail, t.setPass, t.start]);
+
   return (
     <ToolWorkspace
+      taskFailure={t.error ? { message: t.error, logs: t.logs, onClose: t.clearError } : undefined}
       params={
         <>
           <PresetManager type="check" onApply={applyCheck} initialValues={{ fpsTol, recursive, blackDetect }} currentParams={{ fpsTol, recursive, blackDetect, ...encRef }} />
@@ -1335,8 +2185,8 @@ export function CheckTab() {
               <ui.ComboBox
                 value={refEncId ?? ''}
                 options={encPresets.presets.length
-                  ? [{ label: '(不指定编码规范)', value: '' }, ...encPresets.presets.map((p) => ({ label: `${p.name}`, value: p.id }))]
-                  : [{ label: '(无转码预设)', value: '' }]}
+                  ? [{ label: '不指定编码规范', value: '' }, ...encPresets.presets.map((p) => ({ label: p.name, value: p.id }))]
+                  : [{ label: '无转码预设', value: '' }]}
                 onChange={(v) => setRefEncId(v || null)}
               />
             </ui.FieldGrid>
@@ -1344,7 +2194,7 @@ export function CheckTab() {
           <ui.ParamGroup title="检测规则">
             <ui.FieldGrid>
               <ui.FieldLabel>帧率容差</ui.FieldLabel>
-              <ui.NumberField value={fpsTol} min={0} max={10} step={0.1} disabled={!hasRef || t.running} onChange={setFpsTol} />
+              <ui.NumberField value={fpsTol} min={0} max={10} step={0.1} disabled={t.running || isPresetUiFieldDisabled('check', 'fpsTol', { refEncPresetId: refEncId })} onChange={setFpsTol} />
             </ui.FieldGrid>
             <ui.Checkbox checked={recursive} onChange={setRecursive} disabled={t.running}>目录递归扫描</ui.Checkbox>
             <ui.Checkbox checked={blackDetect} onChange={setBlackDetect} disabled={t.running}>启用中间黑帧检测</ui.Checkbox>
@@ -1354,15 +2204,16 @@ export function CheckTab() {
       actions={
         <ProcessButtons
           running={t.running}
-          selectedCount={fl.selectedPaths.length}
-          totalCount={fl.paths.length}
+          selectedCount={fl.selectedCount}
+          totalCount={fl.totalCount}
           onSelected={() => runPaths(fl.selectedPaths)}
-          onAll={() => runPaths(fl.paths)}
+          onAll={() => runPaths(fl.allPaths)}
+          onStop={t.cancel}
         />
       }
-      resultHeader={<ui.ProgressBar value={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} />}
-      resultTitle={<ui.SectionTitle>检测日志</ui.SectionTitle>}
-      result={<ui.LogView lines={t.logs} />}
+      resultHeader={<ResultViewProgress value={resultView} onChange={setResultView} progress={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} running={t.running} />}
+      resultTitle={<ResultViewTitle value={resultView} logs={t.logs.length} running={t.running} />}
+      result={<ResultViewContent value={resultView} logs={t.logs} preview={<VideoPlayer src={media.src} filePath={media.path} cropEnabled={false} controlsDisabled={t.running} />} />}
     />
   );
 }
@@ -1372,74 +2223,146 @@ export function CheckTab() {
 export function AlphaTab() {
   const fl = useFileList();
   const t = useTaskRunner();
+  const [resultView, setResultView] = useResultView(t.running);
+  const { output, presetName, setOutputField, applyOutput } = useOutputFormState();
   const [fpsOriginal, setFpsOriginal] = useState(true);
   const [fps, setFps] = useState(25.0);
   const media = useActiveMedia(fl.activePath, true);
 
+  const applyAlpha = (params: any, nextPresetName = '') => {
+    if (params.fpsOriginal != null) setFpsOriginal(params.fpsOriginal);
+    if (params.fps != null) setFps(params.fps);
+    applyOutput(params, nextPresetName);
+  };
+
   const runBatch = (targets: string[]) => {
-    const files = onlyFiles(targets);
     t.start(async () => {
+      const files = onlyFiles(await fl.resolveLeafPaths(targets));
+      if (files.length === 0) throw new Error('没有可处理的素材文件');
       let ok = 0;
       let bad = 0;
+      const outputs: string[] = [];
       for (let i = 0; i < files.length; i++) {
+        if (t.isCancelled()) break;
         const input = files[i];
-        const output = input.replace(/\.[^.]+$/, '') + '_合成.mov';
+        t.appendLog(fileLogEvent('file_start', input, i, files.length, 'normal', '等待合成'));
         t.setDetail(`(${i + 1}/${files.length}) ${input.split(/[/\\]/).pop()}`);
         t.setProgress(Math.round((i / files.length) * 100));
         try {
-          await composeAlpha(input, output, fpsOriginal ? null : fps);
+          const outputPath = await composeAlpha(input, fpsOriginal ? null : fps, toOutputSettings(output, presetName));
           ok++;
           t.setPass(ok);
-          t.appendLog(`[PASS] ${output}`);
+          outputs.push(outputPath);
+          t.appendLog(`[PASS] ${outputPath}`);
+          t.appendLog(fileLogEvent('file_end', input, i, files.length, 'pass', '合成完成'));
         } catch (e: any) {
           bad++;
           t.setFail(bad);
           t.appendLog(`[FAIL] ${input}: ${e?.message || e}`);
+          t.appendLog(fileLogEvent('file_end', input, i, files.length, 'fail', '合成失败'));
         }
+        if (t.isCancelled()) break;
       }
-      t.setProgress(100);
+      if (!t.isCancelled()) t.setProgress(100);
+      t.setOutputPaths(outputs);
       if (bad > 0 && ok === 0) throw new Error(`全部失败 (${bad})`);
     });
   };
 
+  useEffect(() => registerAgentTaskHandler('alpha', (agentTask) => t.start(async (): Promise<AgentTaskExecutionResult> => {
+    const preset = requireAgentPreset(
+      agentTask.presetSnapshots,
+      agentTask.presetId,
+      '透明通道',
+      agentTask.presetRevision,
+      'alpha',
+    );
+    const params: any = { ...DEFAULT_OUTPUT_FORM, ...preset.params };
+    const files = onlyFiles(await fl.resolveLeafPaths(agentTask.inputPaths));
+    if (files.length === 0) throw new Error('没有可处理的素材文件');
+    let succeeded = 0;
+    let failed = 0;
+    const outputs: string[] = [];
+    for (let index = 0; index < files.length; index += 1) {
+      if (t.isCancelled()) break;
+      const input = files[index];
+      t.appendLog(fileLogEvent('file_start', input, index, files.length, 'normal', '等待合成'));
+      t.setDetail(`(${index + 1}/${files.length}) ${input.split(/[/\\]/).pop()}`);
+      t.setProgress(Math.round((index / files.length) * 100));
+      try {
+        const outputPath = await composeAlpha(
+          input,
+          params.fpsOriginal !== false ? null : (params.fps ?? 25),
+          { ...toOutputSettings(params, preset.name), uniqueName: true },
+        );
+        succeeded += 1;
+        outputs.push(outputPath);
+        t.setPass(succeeded);
+        t.appendLog(`[PASS] ${outputPath}`);
+        t.appendLog(fileLogEvent('file_end', input, index, files.length, 'pass', '合成完成'));
+      } catch (error: any) {
+        if (t.isCancelled()) break;
+        failed += 1;
+        t.setFail(failed);
+        t.appendLog(`[FAIL] ${input}: ${String(error?.message || error)}`);
+        t.appendLog(fileLogEvent('file_end', input, index, files.length, 'fail', '合成失败'));
+      }
+    }
+    t.setOutputPaths(t.isCancelled() ? [] : outputs);
+    if (!t.isCancelled()) t.setProgress(100);
+    if (failed > 0 && succeeded === 0) throw new Error(`全部失败 (${failed})`);
+    return {
+      outputPaths: outputs,
+      detail: `透明通道完成 ${succeeded}，失败 ${failed}`,
+    };
+  })), [
+    fl.resolveLeafPaths,
+    t.appendLog,
+    t.isCancelled,
+    t.setDetail,
+    t.setFail,
+    t.setOutputPaths,
+    t.setPass,
+    t.setProgress,
+    t.start,
+  ]);
+
   return (
     <ToolWorkspace
+      taskFailure={t.error ? { message: t.error, logs: t.logs, onClose: t.clearError } : undefined}
       params={
         <>
-          {media.name && <ui.HintLabel>预览: {media.name}</ui.HintLabel>}
+          <PresetManager
+            type="alpha"
+            onApply={applyAlpha}
+            initialValues={{ fpsOriginal, fps, ...output }}
+            currentParams={{ fpsOriginal, fps, ...output }}
+          />
           <ui.ParamGroup title="帧率设置">
             <ui.Radio checked={fpsOriginal} onToggle={() => setFpsOriginal(true)}>保持原始帧率</ui.Radio>
             <div className="se-btn-row">
               <ui.Radio checked={!fpsOriginal} onToggle={() => setFpsOriginal(false)}>自定义帧率</ui.Radio>
-              <ui.NumberField value={fps} min={1} max={120} step={0.1} disabled={fpsOriginal} onChange={setFps} width={110} />
+              <ui.NumberField value={fps} min={1} max={120} step={0.1} disabled={isPresetUiFieldDisabled('alpha', 'fps', { fpsOriginal })} onChange={setFps} width={110} />
             </div>
           </ui.ParamGroup>
+          <OutputLocationGroup value={output} presetName={presetName} extension="mov" defaultSuffix="_合成" onChange={setOutputField} disabled={t.running} />
           {media.warn && <ui.WarnLabel>{media.warn}</ui.WarnLabel>}
         </>
       }
       actions={
         <ProcessButtons
           running={t.running}
-          selectedCount={onlyFiles(fl.selectedPaths).length}
-          totalCount={onlyFiles(fl.paths).length}
+          selectedCount={fl.selectedCount}
+          totalCount={fl.totalCount}
           onSelected={() => runBatch(fl.selectedPaths)}
-          onAll={() => runBatch(fl.paths)}
-          onStop={() => t.setDetail('已取消')}
+          onAll={() => runBatch(fl.allPaths)}
+          onStop={t.cancel}
+          onOpenOutput={t.outputPaths.length > 0 ? t.openOutputs : undefined}
         />
       }
-      resultHeader={<ui.ProgressBar value={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} />}
-      resultTitle={<ui.SectionTitle>实时预览</ui.SectionTitle>}
-      result={
-        <>
-          <VideoPlayer src={media.src} alphaPreview cropEnabled={false} />
-          {t.logs.length > 0 && (
-            <>
-              <ui.SectionTitle>日志</ui.SectionTitle>
-              <ui.LogView lines={t.logs} />
-            </>
-          )}
-        </>
-      }
+      resultHeader={<ResultViewProgress value={resultView} onChange={setResultView} progress={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} running={t.running} />}
+      resultTitle={<ResultViewTitle value={resultView} logs={t.logs.length} running={t.running} />}
+      result={<ResultViewContent value={resultView} logs={t.logs} preview={<VideoPlayer src={media.src} filePath={media.path} alphaPreview cropEnabled={false} controlsDisabled={t.running} />} />}
     />
   );
 }
@@ -1449,15 +2372,16 @@ export function AlphaTab() {
 export function ScreenshotTab() {
   const fl = useFileList();
   const t = useTaskRunner();
+  const { output, presetName, setOutputField, applyOutput } = useOutputFormState();
   const playerRef = useRef<VideoPlayerHandle>(null);
   const media = useActiveMedia(fl.activePath, true);
-  const [w, setW] = useState(1920);
-  const [h, setH] = useState(1080);
+  const [w, setW] = useState(DEFAULT_EXPORT_DIMENSIONS.width);
+  const [h, setH] = useState(DEFAULT_EXPORT_DIMENSIONS.height);
   const [aspect, setAspect] = useState('free');
   const [customRatio, setCustomRatio] = useState('3:2');
   const [cropLocked, setCropLocked] = useState(false);
   const [time, setTime] = useState('00:00:00.000');
-  const [cropInfo, setCropInfo] = useState('裁剪区域: 未选择 (将使用完整画面缩放)');
+  const [resultView, setResultView] = useResultView(t.running);
 
   // 根据当前比例设置播放器选区约束（自定义比例实时解析）
   const applyAspect = () => {
@@ -1487,7 +2411,17 @@ export function ScreenshotTab() {
     if (v === 'free') {
       playerRef.current?.setCropAspect(0, 0); // 自由：直接截取，输出尺寸由选区决定
       if (media.info) { setW(media.info.width); setH(media.info.height); }
-    } else if (v === 'match') playerRef.current?.setCropAspect(w, h);
+    } else if (v === 'match') {
+      const next = dimensionsForCropAspect(
+        v,
+        media.info,
+        playerRef.current?.getCropRect() ?? null,
+        { width: w, height: h },
+      );
+      setW(next.width);
+      setH(next.height);
+      playerRef.current?.setCropAspect(next.width, next.height);
+    }
     else { const r = aspectToRatio(v, customRatio); if (r && w > 0) setH(linkAspectHeight(w, r)); } // 选比例后按当前宽重算高
   };
   const [crw, crh] = parseCustomRatioParts(customRatio);
@@ -1511,65 +2445,93 @@ export function ScreenshotTab() {
   useEffect(() => {
     if (aspect === 'match') playerRef.current?.setCropAspect(w, h);
   }, [w, h, aspect]);
-  // 自由模式下，加载素材后把输出尺寸初始化为完整画面
+  // 自由/匹配模式下，加载素材后把输出尺寸初始化为完整画面
   useEffect(() => {
-    if (media.info && aspect === 'free') { setW(media.info.width); setH(media.info.height); }
+    if (media.info && (aspect === 'free' || aspect === 'match')) {
+      const next = dimensionsForCropAspect(aspect, media.info, null, { width: w, height: h });
+      setW(next.width);
+      setH(next.height);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [media.info]);
 
-  const applyShot = (params: any) => {
-    if (params.w != null) setW(params.w);
-    if (params.h != null) setH(params.h);
-    if (params.aspect != null) setAspect(params.aspect);
+  const applyShot = (params: any, nextPresetName = '') => {
+    const nextAspect = params.aspect ?? aspect;
+    const nextDimensions = dimensionsForCropAspect(
+      nextAspect,
+      media.info,
+      playerRef.current?.getCropRect() ?? null,
+      { width: params.w ?? w, height: params.h ?? h },
+    );
+    setW(nextDimensions.width);
+    setH(nextDimensions.height);
+    if (params.aspect != null) setAspect(nextAspect);
     if (params.customRatio != null) setCustomRatio(params.customRatio);
+    applyOutput(params, nextPresetName);
   };
 
   const onCrop = (r: CropRectResult) => {
     if (r.w === 0 && r.h === 0) {
-      setCropInfo('裁剪区域: 未选择 (将使用完整画面缩放)');
-      // 自由模式：清除选区后输出尺寸回到完整画面
-      if (aspect === 'free' && media.info) { setW(media.info.width); setH(media.info.height); }
+      // 自由/匹配模式：清除选区后输出尺寸回到完整画面
+      if ((aspect === 'free' || aspect === 'match') && media.info) {
+        const next = dimensionsForCropAspect(aspect, media.info, null, { width: w, height: h });
+        setW(next.width);
+        setH(next.height);
+      }
     } else {
-      setCropInfo(`裁剪区域: ${r.x},${r.y}  尺寸: ${r.w}×${r.h}`);
-      // 自由模式：输出尺寸直接等于所截区域（native 分辨率）
-      if (aspect === 'free') { setW(r.w); setH(r.h); }
+      // 自由/匹配模式：输出尺寸直接等于所截区域（native 分辨率）
+      if (aspect === 'free' || aspect === 'match') {
+        const next = dimensionsForCropAspect(aspect, media.info, r, { width: w, height: h });
+        setW(next.width);
+        setH(next.height);
+      }
     }
   };
 
   const runBatch = (targets: string[]) => {
-    const files = onlyFiles(targets);
     t.start(async () => {
+      const files = onlyFiles(await fl.resolveLeafPaths(targets));
+      if (files.length === 0) throw new Error('没有可处理的素材文件');
       let ok = 0;
       let bad = 0;
+      const outputs: string[] = [];
       const ts = playerRef.current?.getCurrentTime() ?? 0;
       const crop = playerRef.current?.getCropRect() ?? null;
+      const cropDimensions = playerRef.current?.getMediaDimensions() ?? null;
       for (let i = 0; i < files.length; i++) {
+        if (t.isCancelled()) break;
         const file = files[i];
-        const out = file.replace(/\.[^.]+$/, '') + `_screenshot_${ts.toFixed(2)}s.png`;
+        t.appendLog(fileLogEvent('file_start', file, i, files.length, 'normal', '等待截图'));
         t.setDetail(`(${i + 1}/${files.length}) ${file.split(/[/\\]/).pop()}`);
         t.setProgress(Math.round((i / files.length) * 100));
         try {
-          await screenshotFrame(file, out, ts, w, h, crop as CropRect | null);
+          const targetCrop = await cropForTarget(file, crop, cropDimensions);
+          const outputPath = await screenshotFrame(file, ts, w, h, targetCrop, toOutputSettings(output, presetName));
           ok++;
           t.setPass(ok);
-          t.appendLog(`[PASS] ${out}`);
+          outputs.push(outputPath);
+          t.appendLog(`[PASS] ${outputPath}`);
+          t.appendLog(fileLogEvent('file_end', file, i, files.length, 'pass', '截图完成'));
         } catch (e: any) {
           bad++;
           t.setFail(bad);
           t.appendLog(`[FAIL] ${file}: ${e?.message || e}`);
+          t.appendLog(fileLogEvent('file_end', file, i, files.length, 'fail', '截图失败'));
         }
+        if (t.isCancelled()) break;
       }
-      t.setProgress(100);
+      if (!t.isCancelled()) t.setProgress(100);
+      t.setOutputPaths(outputs);
       if (bad > 0 && ok === 0) throw new Error(`全部失败 (${bad})`);
     });
   };
 
   return (
     <ToolWorkspace
+      taskFailure={t.error ? { message: t.error, logs: t.logs, onClose: t.clearError } : undefined}
       params={
         <>
-          <PresetManager type="screenshot" onApply={applyShot} initialValues={{ w, h, aspect, customRatio }} currentParams={{ w, h, aspect, customRatio }} />
-          {media.name && <ui.HintLabel>预览: {media.name}</ui.HintLabel>}
+          <PresetManager type="screenshot" onApply={applyShot} initialValues={{ w, h, aspect, customRatio, ...output }} currentParams={{ w, h, aspect, customRatio, ...output }} />
           {media.info && (
             <ui.VideoInfo>
               {media.info.width}×{media.info.height} · {media.info.fps.toFixed(2)}fps · {formatTime(media.info.duration)}
@@ -1577,73 +2539,90 @@ export function ScreenshotTab() {
             </ui.VideoInfo>
           )}
           <ui.ParamGroup title="选取比例">
-            <ui.FieldGrid>
-              <ui.FieldLabel>比例</ui.FieldLabel>
-              <ui.ComboBox value={aspect} options={CROP_ASPECT_OPTIONS} onChange={onAspectChange} />
-              {aspect === 'custom' && (
-                <React.Fragment>
-                  <ui.FieldLabel>宽比</ui.FieldLabel>
-                  <ui.IntField value={crw} min={1} max={99} onChange={onCustomRatioW} />
-                  <ui.FieldLabel>高比</ui.FieldLabel>
-                  <ui.IntField value={crh} min={1} max={99} onChange={onCustomRatioH} />
-                </React.Fragment>
-              )}
-            </ui.FieldGrid>
-            {aspect === 'free' && <ui.HintLabel>自由模式：直接在画面中框选区域，输出尺寸由选区决定（下方宽高不可编辑）</ui.HintLabel>}
-          </ui.ParamGroup>
-          <ui.ParamGroup title="输出尺寸">
-            <ui.FieldGrid tight>
-              <ui.FieldLabel>宽</ui.FieldLabel>
-              <ui.IntField value={w} min={1} max={8192} disabled={aspect === 'free'} onChange={onW} />
-              <ui.FieldLabel>高</ui.FieldLabel>
-              <ui.IntField value={h} min={1} max={8192} disabled={aspect === 'free'} onChange={onH} />
-            </ui.FieldGrid>
-          </ui.ParamGroup>
-          <ui.ParamGroup title="裁剪区域">
-            <div className="se-btn-row">
-              <ui.Checkbox checked={cropLocked} onChange={setCropLocked}>锁定选区</ui.Checkbox>
+            <ui.AnimatedFieldGrid rows={[
+              {
+                id: 'aspect',
+                content: (
+                  <>
+                    <ui.FieldLabel>比例</ui.FieldLabel>
+                    <ui.ComboBox value={aspect} options={CROP_ASPECT_OPTIONS} onChange={onAspectChange} />
+                  </>
+                ),
+              },
+              ...(aspect === 'custom' ? [{
+                id: 'custom-ratio',
+                content: (
+                  <>
+                    <ui.FieldLabel>宽比</ui.FieldLabel>
+                    <ui.IntField value={crw} min={1} max={99} onChange={onCustomRatioW} />
+                    <ui.FieldLabel>高比</ui.FieldLabel>
+                    <ui.IntField value={crh} min={1} max={99} onChange={onCustomRatioH} />
+                  </>
+                ),
+              }] : []),
+            ]} />
+            <div className="se-crop-actions">
+              <ui.Button
+                primary={cropLocked}
+                icon={cropLocked ? <IconUnlock size={15} /> : <IconLock size={15} />}
+                onClick={() => setCropLocked((locked) => !locked)}
+              >
+                {cropLocked ? '解锁选区' : '锁定选区'}
+              </ui.Button>
               <ui.Button
                 disabled={t.running}
                 icon={<IconCropClear size={15} />}
-                onClick={() => { playerRef.current?.clearCrop(); setCropInfo('裁剪区域: 未选择 (将使用完整画面缩放)'); }}
+                onClick={() => playerRef.current?.clearCrop()}
               >
                 清除选区
               </ui.Button>
             </div>
-            <ui.HintLabel>{cropInfo}</ui.HintLabel>
           </ui.ParamGroup>
+          <ui.ParamGroup title="输出尺寸">
+            <ui.FieldGrid tight>
+              <ui.FieldLabel>分辨率 (长×宽)</ui.FieldLabel>
+              <div className="se-res-row">
+                <ui.IntField value={w} min={1} max={8192} suffix="px" disabled={isPresetUiFieldDisabled('screenshot', 'w', { aspect })} onChange={onW} />
+                <span className="se-x">×</span>
+                <ui.IntField value={h} min={1} max={8192} suffix="px" disabled={isPresetUiFieldDisabled('screenshot', 'h', { aspect })} onChange={onH} />
+              </div>
+            </ui.FieldGrid>
+          </ui.ParamGroup>
+          <OutputLocationGroup value={output} presetName={presetName} extension="png" defaultSuffix="_screenshot" onChange={setOutputField} disabled={t.running} />
         </>
       }
       actions={
         <ProcessButtons
           running={t.running}
-          selectedCount={onlyFiles(fl.selectedPaths).length}
-          totalCount={onlyFiles(fl.paths).length}
+          selectedCount={fl.selectedCount}
+          totalCount={fl.totalCount}
           onSelected={() => runBatch(fl.selectedPaths)}
-          onAll={() => runBatch(fl.paths)}
+          onAll={() => runBatch(fl.allPaths)}
+          onStop={t.cancel}
+          onOpenOutput={t.outputPaths.length > 0 ? t.openOutputs : undefined}
         />
       }
-      resultHeader={<ui.ProgressBar value={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} />}
-      resultTitle={<ui.SectionTitle>实时预览</ui.SectionTitle>}
-      result={
-        <>
-          <VideoPlayer
-            ref={playerRef}
-            src={media.src}
-            alphaPreview={!!media.info?.has_alpha}
-            cropEnabled
-            cropLocked={cropLocked}
-            onFrame={(tm) => setTime(formatTime(tm))}
-            onCropChange={onCrop}
-          />
-          {t.logs.length > 0 && (
-            <>
-              <ui.SectionTitle>日志</ui.SectionTitle>
-              <ui.LogView lines={t.logs} />
-            </>
+      resultHeader={<ResultViewProgress value={resultView} onChange={setResultView} progress={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} running={t.running} />}
+      resultTitle={<ResultViewTitle value={resultView} logs={t.logs.length} running={t.running} />}
+      result={(
+        <ResultViewContent
+          value={resultView}
+          logs={t.logs}
+          preview={(
+            <VideoPlayer
+              ref={playerRef}
+              src={media.src}
+              filePath={media.path}
+              alphaPreview={!!media.info?.has_alpha}
+              cropEnabled
+              cropLocked={cropLocked}
+              controlsDisabled={t.running}
+              onFrame={(tm) => setTime(formatTime(tm))}
+              onCropChange={onCrop}
+            />
           )}
-        </>
-      }
+        />
+      )}
     />
   );
 }
@@ -1653,44 +2632,81 @@ export function ScreenshotTab() {
 export function ExportTab({ format }: { format: 'gif' | 'webp' | 'clip' }) {
   const fl = useFileList();
   const t = useTaskRunner();
+  const { output, presetName, setOutputField, applyOutput } = useOutputFormState();
   const playerRef = useRef<VideoPlayerHandle>(null);
   const media = useActiveMedia(fl.activePath, true);
   const [start, setStart] = useState('00:00:00.000');
   const [end, setEnd] = useState('00:00:05.000');
-  const [duration, setDuration] = useState('片段时长: 5.000s');
+  const [hasStart, setHasStart] = useState(false);
+  const [hasEnd, setHasEnd] = useState(false);
   const [fixedDur, setFixedDur] = useState(false);
   const [fixedVal, setFixedVal] = useState(2.0);
+  const [loopSelection, setLoopSelection] = useState(false);
   const encPresets = usePresets('encode');
-  const [w, setW] = useState(format === 'clip' ? 0 : 480);
-  const [h, setH] = useState(format === 'clip' ? 0 : 270);
-  const [fps, setFps] = useState(15.0);
+  const [w, setW] = useState(DEFAULT_EXPORT_DIMENSIONS.width);
+  const [h, setH] = useState(DEFAULT_EXPORT_DIMENSIONS.height);
+  const [fps, setFps] = useState(format === 'clip' ? 25 : 15);
   const [quality, setQuality] = useState(75);
+  const [gifCompression, setGifCompression] = useState<GifCompression>('optimized');
   const [aspect, setAspect] = useState('free');
   const [customRatio, setCustomRatio] = useState('3:2');
   const [cropLocked, setCropLocked] = useState(false);
-  const [cropInfo, setCropInfo] = useState('裁剪区域: 未选择 (将使用完整画面缩放)');
   const [clipPresetId, setClipPresetId] = useState('');
+  const selectedClipPreset = encPresets.presets.find((preset) => preset.id === clipPresetId) ?? null;
+  const [resultView, setResultView] = useResultView(t.running);
+  const startSeconds = hasStart ? parseTime(start) : null;
+  const endSeconds = hasEnd ? parseTime(end) : null;
+  const rangeValid = startSeconds != null && endSeconds != null && endSeconds > startSeconds;
+  const rangeDuration = rangeValid ? endSeconds - startSeconds : 0;
+  const rangeHint = !hasStart
+    ? '请先定位播放器并设置入点'
+    : !hasEnd
+      ? '入点已设置，请定位并设置出点'
+      : rangeValid
+        ? `导出区间 ${start} - ${end} · ${rangeDuration.toFixed(3)}s`
+        : '出点必须晚于入点';
 
-  const applyExport = (params: any) => {
-    if (params.w != null) setW(params.w);
-    if (params.h != null) setH(params.h);
-    if (params.aspect != null) setAspect(params.aspect);
+  const applyExport = (params: any, nextPresetName = '') => {
+    const nextAspect = params.aspect ?? aspect;
+    const nextDimensions = dimensionsForCropAspect(
+      nextAspect,
+      media.info,
+      playerRef.current?.getCropRect() ?? null,
+      { width: params.w ?? w, height: params.h ?? h },
+    );
+    setW(nextDimensions.width);
+    setH(nextDimensions.height);
+    if (params.aspect != null) setAspect(nextAspect);
     if (params.customRatio != null) setCustomRatio(params.customRatio);
     if (params.fps != null) setFps(params.fps);
     if (params.quality != null) setQuality(params.quality);
+    if (params.gifCompression != null) setGifCompression(params.gifCompression);
     if (params.fixedDur != null) setFixedDur(params.fixedDur);
     if (params.fixedVal != null) setFixedVal(params.fixedVal);
+    if (params.clipPresetId != null) {
+      const requested = String(params.clipPresetId);
+      setClipPresetId(encPresets.presets.some((preset) => preset.id === requested)
+        ? requested
+        : '');
+    }
+    applyOutput(params, nextPresetName);
   };
 
   const onCrop = (r: CropRectResult) => {
     if (r.w === 0 && r.h === 0) {
-      setCropInfo('裁剪区域: 未选择 (将使用完整画面缩放)');
-      // 自由模式：清除选区后输出尺寸回到完整画面
-      if (aspect === 'free' && media.info) { setW(media.info.width); setH(media.info.height); }
+      // 自由/匹配模式：清除选区后输出尺寸回到完整画面
+      if ((aspect === 'free' || aspect === 'match') && media.info) {
+        const next = dimensionsForCropAspect(aspect, media.info, null, { width: w, height: h });
+        setW(next.width);
+        setH(next.height);
+      }
     } else {
-      setCropInfo(`裁剪区域: ${r.x},${r.y}  尺寸: ${r.w}×${r.h}`);
-      // 自由模式：输出尺寸直接等于所截区域（native 分辨率）
-      if (aspect === 'free') { setW(r.w); setH(r.h); }
+      // 自由/匹配模式：输出尺寸直接等于所截区域（native 分辨率）
+      if (aspect === 'free' || aspect === 'match') {
+        const next = dimensionsForCropAspect(aspect, media.info, r, { width: w, height: h });
+        setW(next.width);
+        setH(next.height);
+      }
     }
   };
   // 根据当前比例设置播放器选区约束（自定义比例实时解析）
@@ -1720,7 +2736,17 @@ export function ExportTab({ format }: { format: 'gif' | 'webp' | 'clip' }) {
     if (v === 'free') {
       playerRef.current?.setCropAspect(0, 0); // 自由：直接截取，输出尺寸由选区决定
       if (media.info) { setW(media.info.width); setH(media.info.height); }
-    } else if (v === 'match') playerRef.current?.setCropAspect(w, h);
+    } else if (v === 'match') {
+      const next = dimensionsForCropAspect(
+        v,
+        media.info,
+        playerRef.current?.getCropRect() ?? null,
+        { width: w, height: h },
+      );
+      setW(next.width);
+      setH(next.height);
+      playerRef.current?.setCropAspect(next.width, next.height);
+    }
     else { const r = aspectToRatio(v, customRatio); if (r && w > 0) setH(linkAspectHeight(w, r)); } // 选比例后按当前宽重算高
   };
   const [crw, crh] = parseCustomRatioParts(customRatio);
@@ -1743,80 +2769,164 @@ export function ExportTab({ format }: { format: 'gif' | 'webp' | 'clip' }) {
   useEffect(() => {
     if (aspect === 'match' && w > 0 && h > 0) playerRef.current?.setCropAspect(w, h);
   }, [w, h, aspect]);
-  // 自由模式下，加载素材后把输出尺寸初始化为完整画面
+  // 自由/匹配模式下，所有导出类型都从当前素材初始化输出尺寸
   useEffect(() => {
-    if (media.info && aspect === 'free') { setW(media.info.width); setH(media.info.height); }
+    if (media.info && (aspect === 'free' || aspect === 'match')) {
+      const next = dimensionsForCropAspect(aspect, media.info, null, { width: w, height: h });
+      setW(next.width);
+      setH(next.height);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [media.info]);
-  const syncDur = () => {
-    const s = parseTime(start); const e = parseTime(end);
-    if (s != null && e != null) setDuration(`片段时长: ${(e - s).toFixed(3)}s`);
+
+  useEffect(() => {
+    setStart('00:00:00.000');
+    setEnd('00:00:05.000');
+    setHasStart(false);
+    setHasEnd(false);
+    setLoopSelection(false);
+    playerRef.current?.setLoopRange(0, 0);
+  }, [media.path]);
+
+  useEffect(() => {
+    if (!fixedDur || !hasStart) return;
+    const s = parseTime(start);
+    if (s == null || fixedVal <= 0) {
+      setHasEnd(false);
+      return;
+    }
+    setEnd(formatTime(s + fixedVal));
+    setHasEnd(true);
+  }, [fixedDur, fixedVal, hasStart, start]);
+
+  useEffect(() => {
+    if (loopSelection && rangeValid) {
+      playerRef.current?.setLoopRange(startSeconds!, endSeconds!);
+    } else {
+      playerRef.current?.setLoopRange(0, 0);
+    }
+  }, [endSeconds, loopSelection, rangeValid, startSeconds]);
+
+  const setStartNow = () => {
+    const tm = playerRef.current?.getCurrentTime() ?? 0;
+    setStart(formatTime(tm));
+    setHasStart(true);
+    if (!fixedDur) {
+      setHasEnd(false);
+      setLoopSelection(false);
+    }
   };
-  const setStartNow = () => { const tm = playerRef.current?.getCurrentTime() ?? 0; setStart(formatTime(tm)); syncDur(); };
-  const setEndNow = () => { const tm = playerRef.current?.getCurrentTime() ?? 0; setEnd(formatTime(tm)); syncDur(); };
+  const setEndNow = () => {
+    if (!hasStart || fixedDur) return;
+    const tm = playerRef.current?.getCurrentTime() ?? 0;
+    setEnd(formatTime(tm));
+    setHasEnd(true);
+  };
+  const changeStartInput = (value: string) => {
+    setStart(value);
+    const valid = parseTime(value) != null;
+    setHasStart(valid);
+    if (!valid) {
+      setHasEnd(false);
+      setLoopSelection(false);
+    }
+  };
+  const changeEndInput = (value: string) => {
+    if (!hasStart || fixedDur) return;
+    setEnd(value);
+    setHasEnd(parseTime(value) != null);
+  };
+  const moveStartMarker = (timeSec: number) => {
+    const latestEnd = hasEnd ? parseTime(end) : null;
+    const next = !fixedDur && latestEnd != null
+      ? Math.min(timeSec, Math.max(0, latestEnd - 0.001))
+      : timeSec;
+    setStart(formatTime(next));
+    setHasStart(true);
+  };
+  const moveEndMarker = (timeSec: number) => {
+    const latestStart = parseTime(start);
+    if (fixedDur || latestStart == null) return;
+    setEnd(formatTime(Math.max(timeSec, latestStart + 0.001)));
+    setHasEnd(true);
+  };
 
   const runBatch = (targets: string[]) => {
-    const files = onlyFiles(targets);
-    const s = parseTime(start) ?? 0;
-    let e = parseTime(end) ?? 0;
-    if (fixedDur) e = s + fixedVal;
-    const dur = Math.max(0.01, e - s);
-    const crop = playerRef.current?.getCropRect() ?? null;
-    let segOutFmt = 'mp4';
-    let segVc = '';
-    let segVp = '';
-    let segCrf = 0;
-    let segVbr = 0;
-    if (format === 'clip' && clipPresetId) {
-      const ep = encPresets.presets.find((p) => p.id === clipPresetId);
-      if (ep) {
-        segOutFmt = ep.params.container || 'mp4';
-        segVc = ep.params.videoCodec || '';
-        segVp = ep.params.videoProfile || '';
-        segCrf = ep.params.crf ?? 0;
-        segVbr = ep.params.videoBitrate ?? 0;
-      }
+    if (format === 'clip' && !selectedClipPreset) {
+      void t.start(async () => { throw new Error('请先选择一个编码预设'); });
+      return;
     }
-    if (!segOutFmt) segOutFmt = 'mp4';
+    if (!rangeValid) {
+      void t.start(async () => { throw new Error(rangeHint); });
+      return;
+    }
+    const s = startSeconds!;
+    const dur = rangeDuration;
+    const crop = playerRef.current?.getCropRect() ?? null;
+    const cropDimensions = playerRef.current?.getMediaDimensions() ?? null;
+    const clipParams = selectedClipPreset?.params ?? {};
+    const segOutFmt = clipParams.container || 'mp4';
+    const segVc = clipParams.videoCodec || '';
+    const segVp = clipParams.videoProfile || '';
+    const segPixFmt = clipParams.pixelFormat || '';
+    const segCrf = clipParams.crf ?? 0;
+    const segVbr = clipParams.videoBitrate ?? 0;
+    const segAc = clipParams.audioCodec || '';
+    const segAbr = clipParams.audioBitrate ?? 0;
     t.start(async () => {
+      const files = onlyFiles(await fl.resolveLeafPaths(targets));
+      if (files.length === 0) throw new Error('没有可处理的素材文件');
       let ok = 0;
       let bad = 0;
+      const outputs: string[] = [];
       for (let i = 0; i < files.length; i++) {
+        if (t.isCancelled()) break;
         const file = files[i];
-        const base = file.replace(/\.[^.]+$/, '');
+        t.appendLog(fileLogEvent('file_start', file, i, files.length, 'normal', `等待导出${name}`));
         t.setDetail(`(${i + 1}/${files.length}) ${file.split(/[/\\]/).pop()}`);
         t.setProgress(Math.round((i / files.length) * 100));
         try {
-          if (format === 'gif') await exportGif(file, `${base}.gif`, s, dur, fps, w, h, crop as CropRect | null);
-          else if (format === 'webp') await exportWebp(file, `${base}.webp`, s, dur, fps, w, h, quality, crop as CropRect | null);
-          else await exportSegment(file, `${base}.${segOutFmt}`, s, dur, fps, w, h, segOutFmt, crop as CropRect | null, segVc, segVp, segCrf, segVbr);
+          const outputSettings = toOutputSettings(output, presetName);
+          const targetCrop = await cropForTarget(file, crop, cropDimensions);
+          const outputPath = format === 'gif'
+            ? await exportGif(file, s, dur, fps, w, h, gifCompression, targetCrop, outputSettings)
+            : format === 'webp'
+              ? await exportWebp(file, s, dur, fps, w, h, quality, targetCrop, outputSettings)
+              : await exportSegment(file, s, dur, fps, w, h, segOutFmt, targetCrop, outputSettings, segVc, segVp, segCrf, segVbr, segPixFmt, segAc, segAbr);
           ok++;
           t.setPass(ok);
-          t.appendLog(`[PASS] ${base}`);
+          outputs.push(outputPath);
+          t.appendLog(`[PASS] ${outputPath}`);
+          t.appendLog(fileLogEvent('file_end', file, i, files.length, 'pass', `${name}导出完成`));
         } catch (err: any) {
           bad++;
           t.setFail(bad);
           t.appendLog(`[FAIL] ${file}: ${err?.message || err}`);
+          t.appendLog(fileLogEvent('file_end', file, i, files.length, 'fail', `${name}导出失败`));
         }
+        if (t.isCancelled()) break;
       }
-      t.setProgress(100);
+      if (!t.isCancelled()) t.setProgress(100);
+      t.setOutputPaths(outputs);
       if (bad > 0 && ok === 0) throw new Error(`全部失败 (${bad})`);
     });
   };
 
   const name = format === 'gif' ? 'GIF' : format === 'webp' ? 'WebP' : '片段';
-  const clipIsMov = format === 'clip' && !!encPresets.presets.find((p) => p.id === clipPresetId)?.params.container?.match(/^mov$/i);
+  const outputExtension = format === 'clip' ? (selectedClipPreset?.params.container || 'mp4') : format;
+  const clipIsMov = format === 'clip' && !!selectedClipPreset?.params.container?.match(/^mov$/i);
+  const clipPresetMissing = format === 'clip' && !selectedClipPreset;
   return (
     <ToolWorkspace
+      taskFailure={t.error ? { message: t.error, logs: t.logs, onClose: t.clearError } : undefined}
       params={
         <>
           <PresetManager
             type={format === 'gif' ? 'gif' : format === 'webp' ? 'webp' : 'segment'}
             onApply={applyExport}
-            initialValues={{ w, h, fps, quality, fixedDur, fixedVal, aspect, customRatio }}
-            currentParams={{ w, h, fps, quality, fixedDur, fixedVal, aspect, customRatio }}
+            initialValues={{ w, h, fps, quality, gifCompression, fixedDur, fixedVal, aspect, customRatio, clipPresetId, ...output }}
+            currentParams={{ w, h, fps, quality, gifCompression, fixedDur, fixedVal, aspect, customRatio, clipPresetId, ...output }}
           />
-          {media.name && <ui.HintLabel>预览: {media.name}</ui.HintLabel>}
           {media.info && (
             <ui.VideoInfo>
               {media.info.width}×{media.info.height} · {media.info.fps.toFixed(2)}fps · {formatTime(media.info.duration)}
@@ -1824,101 +2934,149 @@ export function ExportTab({ format }: { format: 'gif' | 'webp' | 'clip' }) {
             </ui.VideoInfo>
           )}
           <ui.ParamGroup title="时间范围">
-            <div className="se-time-grid">
-              <span className="se-detail-label">起始</span>
-              <ui.DropInput value={start} readOnly />
-              <button type="button" onClick={setStartNow}>当前</button>
-              <span className="se-detail-label">结束</span>
-              <ui.DropInput value={end} readOnly />
-              <button type="button" onClick={setEndNow}>当前</button>
-            </div>
-            <ui.HintLabel>{duration}</ui.HintLabel>
-            <div className="se-btn-row">
+            <ui.FieldGrid tight>
+              <ui.FieldLabel>起始</ui.FieldLabel>
+              <div className="se-time-input">
+                <ui.DropInput value={start} ariaLabel="入点时间" onChange={changeStartInput} />
+                <button type="button" onClick={setStartNow}>当前</button>
+              </div>
+              <ui.FieldLabel>结束</ui.FieldLabel>
+              <div className="se-time-input">
+                <ui.DropInput
+                  value={end}
+                  ariaLabel="出点时间"
+                  disabled={!hasStart || fixedDur}
+                  onChange={changeEndInput}
+                />
+                <button type="button" disabled={!hasStart || fixedDur} onClick={setEndNow}>当前</button>
+              </div>
               <ui.Checkbox checked={fixedDur} onChange={setFixedDur}>固定时长</ui.Checkbox>
-              <ui.NumberField value={fixedVal} min={0.1} max={9999} step={0.1} suffix="s" disabled={!fixedDur} onChange={setFixedVal} width={100} />
-            </div>
+              <ui.NumberField value={fixedVal} min={0.1} max={9999} step={0.1} suffix="s" disabled={isPresetUiFieldDisabled(format === 'clip' ? 'segment' : format, 'fixedVal', { fixedDur })} onChange={setFixedVal} />
+            </ui.FieldGrid>
+            <div className={`se-range-status${rangeValid ? ' valid' : ''}`}><ui.HintLabel>{rangeHint}</ui.HintLabel></div>
           </ui.ParamGroup>
           <ui.ParamGroup title="选取比例">
-            <ui.FieldGrid>
-              <ui.FieldLabel>比例</ui.FieldLabel>
-              <ui.ComboBox value={aspect} options={CROP_ASPECT_OPTIONS} onChange={onAspectChange} />
-              {aspect === 'custom' && (
-                <React.Fragment>
-                  <ui.FieldLabel>宽比</ui.FieldLabel>
-                  <ui.IntField value={crw} min={1} max={99} onChange={onCustomRatioW} />
-                  <ui.FieldLabel>高比</ui.FieldLabel>
-                  <ui.IntField value={crh} min={1} max={99} onChange={onCustomRatioH} />
-                </React.Fragment>
-              )}
-            </ui.FieldGrid>
-            {aspect === 'free' && <ui.HintLabel>自由模式：直接在画面中框选区域，输出尺寸由选区决定（下方宽高不可编辑）</ui.HintLabel>}
-          </ui.ParamGroup>
-          <ui.ParamGroup title={`输出参数 (${name})`}>
-            {format !== 'clip' && (
-              <ui.FieldGrid tight>
-                <ui.FieldLabel>宽度</ui.FieldLabel><ui.IntField value={w} min={1} max={4096} disabled={aspect === 'free'} onChange={onW} />
-                <ui.FieldLabel>高度</ui.FieldLabel><ui.IntField value={h} min={1} max={4096} disabled={aspect === 'free'} onChange={onH} />
-                <ui.FieldLabel>帧率</ui.FieldLabel><ui.NumberField value={fps} min={1} max={60} step={0.1} onChange={setFps} />
-                {format === 'webp' && (<><ui.FieldLabel>质量</ui.FieldLabel><ui.IntField value={quality} min={1} max={100} onChange={setQuality} /></>)}
-              </ui.FieldGrid>
-            )}
-            {format === 'clip' && (
-              <ui.FieldGrid>
-                <ui.FieldLabel>编码预设</ui.FieldLabel>
-                <ui.ComboBox
-                  value={clipPresetId}
-                  options={[
-                    { label: '默认（MOV·ProRes4444 / 其他·H.264）', value: '' },
-                    ...encPresets.presets.map((p) => ({ label: `${p.name} · ${(p.params.container || '').toUpperCase()}`, value: p.id })),
-                  ]}
-                  onChange={(v) => setClipPresetId(v)}
-                />
-              </ui.FieldGrid>
-            )}
-            <div className="se-btn-row">
-              <ui.Checkbox checked={cropLocked} onChange={setCropLocked}>锁定选区</ui.Checkbox>
+            <ui.AnimatedFieldGrid rows={[
+              {
+                id: 'aspect',
+                content: (
+                  <>
+                    <ui.FieldLabel>比例</ui.FieldLabel>
+                    <ui.ComboBox value={aspect} options={CROP_ASPECT_OPTIONS} onChange={onAspectChange} />
+                  </>
+                ),
+              },
+              ...(aspect === 'custom' ? [{
+                id: 'custom-ratio',
+                content: (
+                  <>
+                    <ui.FieldLabel>宽比</ui.FieldLabel>
+                    <ui.IntField value={crw} min={1} max={99} onChange={onCustomRatioW} />
+                    <ui.FieldLabel>高比</ui.FieldLabel>
+                    <ui.IntField value={crh} min={1} max={99} onChange={onCustomRatioH} />
+                  </>
+                ),
+              }] : []),
+            ]} />
+            <div className="se-crop-actions">
+              <ui.Button
+                primary={cropLocked}
+                icon={cropLocked ? <IconUnlock size={15} /> : <IconLock size={15} />}
+                onClick={() => setCropLocked((locked) => !locked)}
+              >
+                {cropLocked ? '解锁选区' : '锁定选区'}
+              </ui.Button>
               <ui.Button
                 disabled={t.running}
                 icon={<IconCropClear size={15} />}
-                onClick={() => { playerRef.current?.clearCrop(); setCropInfo('裁剪区域: 未选择 (将使用完整画面缩放)'); }}
+                onClick={() => playerRef.current?.clearCrop()}
               >
                 清除选区
               </ui.Button>
             </div>
-            <ui.HintLabel>{cropInfo}</ui.HintLabel>
           </ui.ParamGroup>
+          <ui.ParamGroup title={`输出参数 (${name})`}>
+            <ui.FieldGrid tight>
+              <ui.FieldLabel>分辨率 (长×宽)</ui.FieldLabel>
+              <div className="se-res-row">
+                <ui.IntField value={w} min={1} max={8192} suffix="px" disabled={isPresetUiFieldDisabled(format === 'clip' ? 'segment' : format, 'w', { aspect })} onChange={onW} />
+                <span className="se-x">×</span>
+                <ui.IntField value={h} min={1} max={8192} suffix="px" disabled={isPresetUiFieldDisabled(format === 'clip' ? 'segment' : format, 'h', { aspect })} onChange={onH} />
+              </div>
+              {format !== 'clip' && (
+                <>
+                  <ui.FieldLabel>帧率</ui.FieldLabel><ui.NumberField value={fps} min={1} max={60} step={0.1} onChange={setFps} />
+                  {format === 'gif' && (<><ui.FieldLabel>压缩方式</ui.FieldLabel><ui.ComboBox value={gifCompression} options={GIF_COMPRESSION_OPTIONS} onChange={(value) => setGifCompression(value as GifCompression)} /></>)}
+                  {format === 'webp' && (<><ui.FieldLabel>质量</ui.FieldLabel><ui.IntField value={quality} min={1} max={100} onChange={setQuality} /></>)}
+                </>
+              )}
+              {format === 'clip' && (
+                <>
+                  <ui.FieldLabel>编码预设</ui.FieldLabel>
+                   <ui.ComboBox
+                     value={clipPresetId}
+                     options={encPresets.presets.map((p) => ({
+                       label: p.name,
+                       value: p.id,
+                       tags: p.params.container ? [String(p.params.container).toUpperCase()] : undefined,
+                     }))}
+                     onChange={(v) => setClipPresetId(v)}
+                     disabled={encPresets.presets.length === 0}
+                     placeholder={encPresets.presets.length ? '请选择' : '没有可用的编码预设'}
+                   />
+                </>
+              )}
+            </ui.FieldGrid>
+          </ui.ParamGroup>
+          <OutputLocationGroup
+            value={output}
+            presetName={presetName}
+            extension={outputExtension}
+            defaultSuffix={format === 'clip' ? '_clip' : ''}
+            onChange={setOutputField}
+            disabled={t.running}
+          />
         </>
       }
       actions={
         <ProcessButtons
           running={t.running}
-          selectedCount={onlyFiles(fl.selectedPaths).length}
-          totalCount={onlyFiles(fl.paths).length}
+          selectedCount={fl.selectedCount}
+          totalCount={fl.totalCount}
           onSelected={() => runBatch(fl.selectedPaths)}
-          onAll={() => runBatch(fl.paths)}
-          onStop={() => t.setDetail('已取消')}
+          onAll={() => runBatch(fl.allPaths)}
+          onStop={t.cancel}
+          onOpenOutput={t.outputPaths.length > 0 ? t.openOutputs : undefined}
+          disabled={!rangeValid || clipPresetMissing}
+          disabledTitle={clipPresetMissing ? '请先创建并选择编码预设' : rangeHint}
         />
       }
-      resultHeader={<ui.ProgressBar value={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} />}
-      resultTitle={<ui.SectionTitle>实时预览</ui.SectionTitle>}
-      result={
-        <>
-          <VideoPlayer
-            ref={playerRef}
-            src={media.src}
-            alphaPreview={clipIsMov}
-            cropEnabled
-            cropLocked={cropLocked}
-            onCropChange={onCrop}
-          />
-          {t.logs.length > 0 && (
-            <>
-              <ui.SectionTitle>日志</ui.SectionTitle>
-              <ui.LogView lines={t.logs} />
-            </>
+      resultHeader={<ResultViewProgress value={resultView} onChange={setResultView} progress={t.progress} detail={t.detail} eta={t.eta} pass={t.pass} fail={t.fail} running={t.running} />}
+      resultTitle={<ResultViewTitle value={resultView} logs={t.logs.length} running={t.running} />}
+      result={(
+        <ResultViewContent
+          value={resultView}
+          logs={t.logs}
+          preview={(
+            <VideoPlayer
+              ref={playerRef}
+              src={media.src}
+              filePath={media.path}
+              alphaPreview={clipIsMov}
+              cropEnabled
+              cropLocked={cropLocked}
+              controlsDisabled={t.running}
+              rangeStart={startSeconds}
+              rangeEnd={endSeconds}
+              onRangeStartChange={moveStartMarker}
+              onRangeEndChange={fixedDur ? undefined : moveEndMarker}
+              rangeLooping={loopSelection}
+              onRangeLoopingChange={setLoopSelection}
+              onCropChange={onCrop}
+            />
           )}
-        </>
-      }
+        />
+      )}
     />
   );
 }

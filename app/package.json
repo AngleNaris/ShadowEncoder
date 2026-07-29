@@ -1,11 +1,15 @@
 {
   "name": "shadowencoder",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "build": "tsc && vite build",
+    "build:cli": "node scripts/stage-agent-cli.mjs",
+    "package:windows": "npm run build:cli && tauri build --config src-tauri/tauri.windows.conf.json",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -21,8 +25,8 @@
     "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
     "typescript": "^5.5.3",
-    "vite": "^5.3.4"
+    "vite": "^6.4.3"
   }
 }

@@ -1,4 +1,4 @@
 @echo off
-cd /d D:\_3.AI\shadowencoder
-set "PATH=D:\_3.AI\shadowencoder\ffmpeg\win;%PATH%"
+cd /d "%~dp0"
+set "PATH=%~dp0ffmpeg\win;%PATH%"
 python shadowencoder_gui.py

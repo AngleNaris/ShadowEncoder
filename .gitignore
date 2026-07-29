@@ -7,6 +7,8 @@ build/
 build_*/
 dist/
 dist_*/
+**/target/
+**/target-*/
 *.spec.bak
 
 # PyInstaller
@@ -21,6 +23,9 @@ ffmpeg/win/ffplay.exe
 ffmpeg/win/img2webp.exe
 ffmpeg/win/webpmux.exe
 ffmpeg-8.1-essentials_build/bin/
+
+# local libmpv development/runtime binaries (per-platform, not committed)
+mpv/win/
 
 # temp / test
 tmp_check/
@@ -44,6 +49,7 @@ tests/__pycache__/
 .claude/
 .cursor/
 .playwright-mcp/
+.playwright-cli/
 .agents/
 .github/
 

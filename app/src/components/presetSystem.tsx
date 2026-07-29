@@ -1,34 +1,85 @@
 // 统一预设系统：所有功能（转码/混音/检测/截图/截取/GIF/WebP）共享的预设管理能力
 // 提供：类型与内存 store、各功能的参数 schema、schema 驱动的通用预设构建器、
 // 美观的"当前预设"卡片、以及可嵌入任意 Tab 的 PresetManager（下拉+新建+导出+卡片）。
-import React, { useState, useRef } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  useRef,
+  type ReactNode,
+} from 'react';
 import * as ui from './ui';
 import { IconClose, IconCheckShield, IconPlus, IconExport, IconImport, IconTrash, IconCopy, IconSettings } from './icons';
+import {
+  DEFAULT_OUTPUT_FORM,
+  OUTPUT_PRESET_FIELDS,
+  OUTPUT_PRESET_KEYS,
+  OutputLocationGroup,
+  describeOutputSettings,
+} from './OutputSettings';
+import { DEFAULT_EXPORT_DIMENSIONS } from '../lib/outputDimensions';
+import {
+  isPresetUiFieldDisabled,
+  isPresetUiFieldVisible,
+  type SharedPresetUiType,
+} from '../lib/presetUiRules';
+import {
+  normalizeWorkflowDefinition,
+  workflowNodeCounts,
+} from '../lib/workflow';
+import {
+  PRESET_STORAGE_KEY,
+  clonePresets,
+  createPresetId as genId,
+  emptyPresetStore,
+  loadPresetStore,
+  serializePresetStore,
+  type Preset,
+  type PresetStore,
+  type PresetType,
+} from '../lib/presetStorage';
+import {
+  getAgentSnapshot,
+  isAgentRevisionConflict,
+  migrateAgentPresets,
+  replaceAgentPresetType,
+  subscribeAgentStateChanged,
+  type AgentSnapshot,
+} from '../lib/agentApi';
+import { isTauriRuntime } from '../lib/ffmpeg';
 
-export type PresetType = 'encode' | 'mix' | 'check' | 'screenshot' | 'segment' | 'gif' | 'webp';
-
-export interface Preset {
-  id: string;
-  name: string;
-  type: PresetType;
-  params: Record<string, any>;
-}
+export type { Preset, PresetType } from '../lib/presetStorage';
 
 export const TYPE_LABEL: Record<PresetType, string> = {
   encode: '转码',
   mix: '混音',
   check: '检测',
+  alpha: '透明通道',
   screenshot: '截图',
   segment: '截取',
   gif: 'GIF',
   webp: 'WebP',
+  backup: 'DIT 备份',
+  workflow: 'DIT 流程',
+};
+
+const OUTPUT_PRESENTATION: Partial<Record<PresetType, { extension: string; defaultSuffix: string }>> = {
+  mix: { extension: 'mp4', defaultSuffix: '_mix' },
+  alpha: { extension: 'mov', defaultSuffix: '_合成' },
+  screenshot: { extension: 'png', defaultSuffix: '_screenshot' },
+  segment: { extension: 'mp4', defaultSuffix: '_clip' },
+  gif: { extension: 'gif', defaultSuffix: '' },
+  webp: { extension: 'webp', defaultSuffix: '' },
 };
 
 type FieldDef = {
   key: string;
   label: string;
   kind: 'int' | 'number' | 'checkbox' | 'select' | 'text';
-  options?: { label: string; value: any }[];
+  options?: ui.ComboBoxOption[];
   min?: number;
   max?: number;
   step?: number;
@@ -39,24 +90,49 @@ type FieldDef = {
 // 选取比例选项（工具页与管理预设共用）。增加「自定义」以支持任意 W:H 比例输入。
 export const CROP_ASPECT_OPTIONS = [
   { label: '自由', value: 'free' },
-  { label: '1:1 方形', value: '1:1' },
+  { label: '1:1', value: '1:1', tags: ['方形'] },
   { label: '4:3', value: '4:3' },
   { label: '16:9', value: '16:9' },
-  { label: '9:16 竖屏', value: '9:16' },
+  { label: '9:16', value: '9:16', tags: ['竖屏'] },
   { label: '匹配输出尺寸', value: 'match' },
-  { label: '自定义…', value: 'custom' },
+  { label: '自定义', value: 'custom' },
 ];
+
+export const GIF_COMPRESSION_OPTIONS = [
+  { label: '智能压缩', value: 'optimized', tags: ['推荐'] },
+  { label: '体积优先', value: 'compact' },
+  { label: '极限压缩', value: 'aggressive' },
+];
+
+export const DEFAULT_BACKUP_PRESET_PARAMS = {
+  destinations: [''],
+  extensions: [] as string[],
+  minSizeMb: 0,
+  mediaOnly: true,
+  recursive: true,
+  operation: 'copy' as const,
+  verifyMd5: true,
+  destinationNameMode: 'original' as const,
+  destinationNameTemplate: '',
+  directoryStructure: 'preserve' as const,
+  renameMode: 'original' as const,
+  renameTemplate: '',
+  conflictStrategy: 'rename' as const,
+  conflictRenameTemplate: '{name}_{index}',
+  conflictSubdirectory: 'Conflicts',
+};
 
 // 各功能预设的参数 schema（encode 使用专属构建器，不在此列）
 export const PRESET_SCHEMAS: Record<Exclude<PresetType, 'encode'>, FieldDef[]> = {
   mix: [
     { key: 'lnOn', label: '响度标准化', kind: 'checkbox', default: true },
-    { key: 'lnI', label: '目标响度 I', kind: 'number', min: -70, max: -5, step: 1, default: -24, hint: 'LUFS' },
-    { key: 'lnTp', label: '真峰 TP', kind: 'number', min: -9, max: 0, step: 0.5, default: -2, hint: 'dBTP' },
-    { key: 'lnLra', label: '响度范围 LRA', kind: 'number', min: 1, max: 50, step: 1, default: 7, hint: 'LU' },
+    { key: 'lnI', label: '目标响度 (I)', kind: 'number', min: -70, max: -5, step: 1, default: -24, hint: 'LUFS' },
+    { key: 'lnTp', label: '真峰限制 (TP)', kind: 'number', min: -9, max: 0, step: 0.5, default: -2, hint: 'dBTP' },
+    { key: 'lnLra', label: '响度范围 (LRA)', kind: 'number', min: 1, max: 50, step: 1, default: 7, hint: 'LU' },
     { key: 'tpOn', label: '动态压缩', kind: 'checkbox', default: true },
     { key: 'cpTh', label: '压缩阈值', kind: 'number', min: -80, max: 0, step: 1, default: -27, hint: 'dB' },
     { key: 'cpGain', label: '补偿增益', kind: 'number', min: -20, max: 40, step: 1, default: 5, hint: 'dB' },
+    ...OUTPUT_PRESET_FIELDS,
   ],
   check: [
     { key: 'refEncPresetId', label: '编码规范预设', kind: 'text', default: '' },
@@ -64,73 +140,222 @@ export const PRESET_SCHEMAS: Record<Exclude<PresetType, 'encode'>, FieldDef[]> =
     { key: 'recursive', label: '目录递归扫描', kind: 'checkbox', default: true },
     { key: 'blackDetect', label: '黑帧检测', kind: 'checkbox', default: true },
   ],
+  alpha: [
+    { key: 'fpsOriginal', label: '保持原始帧率', kind: 'checkbox', default: true },
+    { key: 'fps', label: '输出帧率', kind: 'number', min: 1, max: 120, step: 1, default: 25 },
+    ...OUTPUT_PRESET_FIELDS,
+  ],
   screenshot: [
-    { key: 'aspect', label: '选取比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
+    { key: 'aspect', label: '比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
     { key: 'customRatio', label: '自定义比例', kind: 'text', default: '3:2' },
-    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 8192, default: 1920 },
-    { key: 'h', label: '高度', kind: 'int', min: 1, max: 8192, default: 1080 },
+    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.width },
+    { key: 'h', label: '高度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.height },
+    ...OUTPUT_PRESET_FIELDS,
   ],
   segment: [
-    { key: 'w', label: '宽度 (0=原始)', kind: 'int', min: 0, max: 8192, default: 0 },
-    { key: 'h', label: '高度 (0=原始)', kind: 'int', min: 0, max: 8192, default: 0 },
-    { key: 'fps', label: '帧率', kind: 'number', min: 1, max: 60, step: 0.1, default: 25 },
+    { key: 'aspect', label: '比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
+    { key: 'customRatio', label: '自定义比例', kind: 'text', default: '3:2' },
+    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.width },
+    { key: 'h', label: '高度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.height },
     { key: 'fixedDur', label: '固定时长', kind: 'checkbox', default: false },
     { key: 'fixedVal', label: '时长', kind: 'number', min: 0.1, max: 9999, step: 0.1, default: 2 },
+    { key: 'clipPresetId', label: '编码预设', kind: 'text', default: '' },
+    ...OUTPUT_PRESET_FIELDS,
   ],
   gif: [
-    { key: 'aspect', label: '选取比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
+    { key: 'aspect', label: '比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
     { key: 'customRatio', label: '自定义比例', kind: 'text', default: '3:2' },
-    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 4096, default: 480 },
-    { key: 'h', label: '高度', kind: 'int', min: 1, max: 4096, default: 270 },
+    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 4096, default: DEFAULT_EXPORT_DIMENSIONS.width },
+    { key: 'h', label: '高度', kind: 'int', min: 1, max: 4096, default: DEFAULT_EXPORT_DIMENSIONS.height },
     { key: 'fps', label: '帧率', kind: 'number', min: 1, max: 60, step: 0.1, default: 15 },
+    { key: 'gifCompression', label: '压缩方式', kind: 'select', options: GIF_COMPRESSION_OPTIONS, default: 'optimized' },
     { key: 'fixedDur', label: '固定时长', kind: 'checkbox', default: false },
     { key: 'fixedVal', label: '时长', kind: 'number', min: 0.1, max: 9999, step: 0.1, default: 2 },
+    ...OUTPUT_PRESET_FIELDS,
   ],
   webp: [
-    { key: 'aspect', label: '选取比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
+    { key: 'aspect', label: '比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
     { key: 'customRatio', label: '自定义比例', kind: 'text', default: '3:2' },
-    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 4096, default: 480 },
-    { key: 'h', label: '高度', kind: 'int', min: 1, max: 4096, default: 270 },
+    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 4096, default: DEFAULT_EXPORT_DIMENSIONS.width },
+    { key: 'h', label: '高度', kind: 'int', min: 1, max: 4096, default: DEFAULT_EXPORT_DIMENSIONS.height },
     { key: 'fps', label: '帧率', kind: 'number', min: 1, max: 60, step: 0.1, default: 15 },
     { key: 'quality', label: '质量', kind: 'int', min: 1, max: 100, default: 75 },
     { key: 'fixedDur', label: '固定时长', kind: 'checkbox', default: false },
     { key: 'fixedVal', label: '时长', kind: 'number', min: 0.1, max: 9999, step: 0.1, default: 2 },
+    ...OUTPUT_PRESET_FIELDS,
   ],
+  // DIT 备份使用包含目标目录、标签输入和模板编辑器的专属构建器。
+  backup: [],
+  // DIT 流程使用包含条件分支的专属构建器。
+  workflow: [],
 };
 
-// 各功能内置默认预设（让下拉不空、且直接演示卡片）
-const DEFAULT_PRESETS: Record<PresetType, Preset[]> = {
-  encode: [
-    {
-      id: 'enc-default-1', name: '点歌屏 1080p', type: 'encode',
-      params: { container: 'mp4', videoCodec: 'libx264', videoProfile: 'high', crf: 23, preset: 'medium', tune: 'none', pixelFormat: 'yuv420p', scaleW: 1920, scaleH: 1080, fps: 25, keepRes: false, audioOnly: true, audioCodec: 'aac', audioProfile: 'lc', audioBitrate: 192, audioSampleRate: 48000, audioChannels: 2, unsharp: 2, denoise: 1, style: 2, rateMode: 'crf', targetFileSizeMb: 0 },
-    },
-    {
-      id: 'enc-default-2', name: 'ProRes 422 HQ (MOV)', type: 'encode',
-      params: { container: 'mov', videoCodec: 'prores', videoProfile: '422hq', crf: 23, preset: 'medium', tune: 'none', pixelFormat: 'yuv422p10le', scaleW: 1920, scaleH: 1080, fps: 25, keepRes: false, audioOnly: false, audioCodec: 'pcm_s16le', audioProfile: 'lc', audioBitrate: 192, audioSampleRate: 48000, audioChannels: 2, unsharp: 2, denoise: 1, style: 2, rateMode: 'crf', targetFileSizeMb: 0 },
-    },
-  ],
-  mix: [{ id: 'mix-default-1', name: '广播响度 -24 LUFS', type: 'mix', params: { lnOn: true, lnI: -24, lnTp: -2, lnLra: 7, tpOn: true, cpTh: -27, cpGain: 5 } }],
-  check: [{ id: 'check-default-1', name: '标准检测', type: 'check', params: { refEncPresetId: '', fpsTol: 0.5, recursive: true, blackDetect: true } }],
-  screenshot: [{ id: 'shot-default-1', name: '1080p 截图', type: 'screenshot', params: { aspect: 'free', customRatio: '3:2', w: 1920, h: 1080 } }],
-  segment: [{ id: 'seg-default-1', name: 'MOV 原始画质', type: 'segment', params: { w: 0, h: 0, fps: 25, fixedDur: false, fixedVal: 2 } }],
-  gif: [{ id: 'gif-default-1', name: '小尺寸 480p', type: 'gif', params: { aspect: 'free', customRatio: '3:2', w: 480, h: 270, fps: 15, fixedDur: false, fixedVal: 2 } }],
-  webp: [{ id: 'webp-default-1', name: '中等质量', type: 'webp', params: { aspect: 'free', customRatio: '3:2', w: 480, h: 270, fps: 15, quality: 75, fixedDur: false, fixedVal: 2 } }],
+function storedPresetStore(): PresetStore {
+  if (typeof window === 'undefined') return emptyPresetStore();
+  return loadPresetStore(window.localStorage);
+}
+
+type PresetStoreContextValue = {
+  presets: PresetStore;
+  setType: (type: PresetType, update: (current: Preset[]) => Preset[]) => void;
 };
 
-function genId(): string {
-  return (crypto && crypto.randomUUID && crypto.randomUUID()) || `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+const PresetStoreContext = createContext<PresetStoreContextValue | null>(null);
+
+function samePresetList(left: Preset[], right: Preset[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function clonePresets(list: Preset[]): Preset[] {
-  return list.map((p) => ({ ...p, params: { ...p.params } }));
+function presetApplyFingerprint(preset: Preset): string {
+  return JSON.stringify([preset.id, preset.name, preset.revision ?? 1, preset.params]);
 }
 
-// 每个功能独立的内存预设列表（组件级共享，足以覆盖单页使用）
+export function PresetStoreProvider({ children }: { children: ReactNode }) {
+  const desktopRuntime = isTauriRuntime();
+  const [presets, setPresetsState] = useState<PresetStore>(storedPresetStore);
+  const presetsRef = useRef(presets);
+  const presetRevisionRef = useRef(0);
+  const backendReadyRef = useRef(!desktopRuntime);
+  const pendingBeforeReadyRef = useRef(new Set<PresetType>());
+  const commandQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const localChangeVersionRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  const applySnapshot = useCallback((snapshot: AgentSnapshot, expectedLocalVersion?: number) => {
+    presetRevisionRef.current = snapshot.presetRevision;
+    if (expectedLocalVersion != null && expectedLocalVersion !== localChangeVersionRef.current) return;
+    const next = snapshot.presets;
+    presetsRef.current = next;
+    if (mountedRef.current) setPresetsState(next);
+  }, []);
+
+  const queuePresetCommit = useCallback((
+    type: PresetType,
+    base: Preset[],
+    intended: Preset[],
+    localVersion: number,
+  ) => {
+    commandQueueRef.current = commandQueueRef.current.then(async () => {
+      try {
+        let snapshot: AgentSnapshot;
+        try {
+          snapshot = await replaceAgentPresetType(type, intended, presetRevisionRef.current);
+        } catch (error) {
+          if (!isAgentRevisionConflict(error)) throw error;
+          const latest = await getAgentSnapshot();
+          presetRevisionRef.current = latest.presetRevision;
+          if (!samePresetList(latest.presets[type], base)) {
+            applySnapshot(latest, localVersion);
+            console.error(`预设 ${type} 已被其他操作修改，本次 GUI 修改未覆盖远程状态`);
+            return;
+          }
+          snapshot = await replaceAgentPresetType(type, intended, latest.presetRevision);
+        }
+        presetRevisionRef.current = snapshot.presetRevision;
+        if (localVersion !== localChangeVersionRef.current) return;
+        const next = {
+          ...presetsRef.current,
+          [type]: snapshot.presets[type],
+        };
+        presetsRef.current = next;
+        if (mountedRef.current) setPresetsState(next);
+      } catch (error) {
+        console.error('无法同步预设到 Agent 状态服务', error);
+        try {
+          applySnapshot(await getAgentSnapshot(), localVersion);
+        } catch (refreshError) {
+          console.error('无法刷新 Agent 预设快照', refreshError);
+        }
+      }
+    });
+  }, [applySnapshot]);
+
+  useEffect(() => {
+    if (desktopRuntime) return;
+    try {
+      window.localStorage.setItem(PRESET_STORAGE_KEY, serializePresetStore(presets));
+    } catch {
+      // The in-memory store remains usable when WebView persistence is unavailable.
+    }
+  }, [desktopRuntime, presets]);
+
+  useEffect(() => {
+    if (!desktopRuntime) return undefined;
+    mountedRef.current = true;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void subscribeAgentStateChanged((event) => {
+      if (event.actor === 'gui' || !backendReadyRef.current) return;
+      const localVersion = localChangeVersionRef.current;
+      commandQueueRef.current = commandQueueRef.current.then(async () => {
+        const snapshot = await getAgentSnapshot();
+        applySnapshot(snapshot, localVersion);
+      }).catch((error) => console.error('无法接收 Agent 预设更新', error));
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+
+    const migrationSource = presetsRef.current;
+    void migrateAgentPresets(migrationSource).then((snapshot) => {
+      if (disposed) return;
+      presetRevisionRef.current = snapshot.presetRevision;
+      const pendingTypes = [...pendingBeforeReadyRef.current];
+      pendingBeforeReadyRef.current.clear();
+      const optimistic = presetsRef.current;
+      const next = { ...snapshot.presets };
+      for (const type of pendingTypes) next[type] = optimistic[type];
+      presetsRef.current = next;
+      setPresetsState(next);
+      backendReadyRef.current = true;
+      const localVersion = localChangeVersionRef.current;
+      for (const type of pendingTypes) {
+        queuePresetCommit(type, snapshot.presets[type], optimistic[type], localVersion);
+      }
+    }).catch((error) => {
+      console.error('无法初始化 Agent 预设状态', error);
+    });
+
+    return () => {
+      disposed = true;
+      mountedRef.current = false;
+      unlisten?.();
+    };
+  }, [applySnapshot, desktopRuntime, queuePresetCommit]);
+
+  const setType = useCallback((type: PresetType, update: (current: Preset[]) => Preset[]) => {
+    const current = presetsRef.current;
+    const base = current[type];
+    const nextType = clonePresets(update(base));
+    if (samePresetList(base, nextType)) return;
+    const next = { ...current, [type]: nextType };
+    presetsRef.current = next;
+    setPresetsState(next);
+    const localVersion = ++localChangeVersionRef.current;
+    if (!desktopRuntime) return;
+    if (!backendReadyRef.current) {
+      pendingBeforeReadyRef.current.add(type);
+      return;
+    }
+    queuePresetCommit(type, base, nextType, localVersion);
+  }, [desktopRuntime, queuePresetCommit]);
+
+  const value = useMemo<PresetStoreContextValue>(() => ({
+    presets,
+    setType,
+  }), [presets, setType]);
+  return <PresetStoreContext.Provider value={value}>{children}</PresetStoreContext.Provider>;
+}
+
+// 所有功能共享一个持久化预设仓库，流程中的 presetId 与功能页保持同一引用。
 export function usePresets(type: PresetType) {
-  const [presets, setPresets] = useState<Preset[]>(() => clonePresets(DEFAULT_PRESETS[type] || []));
-  const addPreset = (p: Preset) => setPresets((prev) => [...prev, p]);
-  const removePreset = (id: string) => setPresets((prev) => prev.filter((p) => p.id !== id));
+  const store = useContext(PresetStoreContext);
+  if (!store) throw new Error('usePresets 必须在 PresetStoreProvider 内使用');
+  const presets = store.presets[type];
+  const setPresets = (update: (current: Preset[]) => Preset[]) => store.setType(type, update);
+  const addPreset = (preset: Preset) => setPresets((prev) => [...prev, ...clonePresets([{ ...preset, type }])]);
+  const removePreset = (id: string) => setPresets((prev) => prev.filter((preset) => preset.id !== id));
   // 拖拽排序：将 from 位置的预设移动到 to 位置
   const reorder = (from: number, to: number) => setPresets((prev) => {
     if (from === to || from < 0 || to < 0 || from >= prev.length || to >= prev.length) return prev;
@@ -141,13 +366,23 @@ export function usePresets(type: PresetType) {
   });
   // 更新已有预设（按 id）：编辑列表中已存在的预设时使用
   const updatePreset = (id: string, params: Record<string, any>, name?: string) =>
-    setPresets((prev) => prev.map((p) => (p.id === id
-      ? { ...p, params: { ...params }, name: (name && String(name).trim()) || p.name }
-      : p)));
+    setPresets((prev) => prev.map((preset) => (preset.id === id
+      ? {
+        ...preset,
+        params: JSON.parse(JSON.stringify(params || {})),
+        name: (name && String(name).trim()) || preset.name,
+        revision: (preset.revision ?? 1) + 1,
+      }
+      : preset)));
   // 合并导入的预设：强制 type 为当前类型，并重新生成 id 避免与现有冲突
   const mergePresets = (list: Preset[]) => setPresets((prev) => [
     ...prev,
-    ...list.filter((p) => p && p.params).map((p) => ({ ...p, id: genId(), type })),
+    ...clonePresets(list.filter((preset) => preset && preset.params).map((preset) => ({
+      ...preset,
+      id: genId(),
+      type,
+      revision: 1,
+    }))),
   ]);
   const exportAll = () => {
     const data = JSON.stringify({ type, presets }, null, 2);
@@ -202,7 +437,11 @@ export function parseCustomRatioParts(str?: string): [number, number] {
 // 预设管理构建器上下文：由 PresetManager 注入，encode 专属构建器与通用构建器共用同一套增删改查能力
 export interface PresetBuilderCtx {
   isOpen: boolean;
+  /** 关闭动画期间仍保留弹窗内容，避免条件卸载打断退场。 */
+  isMounted: boolean;
+  closing: boolean;
   onClose: () => void;
+  onExited: () => void;
   presets: Preset[];
   onSaveNew: (data: any) => void;              // data = { name, ...params }
   onUpdate: (id: string, data: any) => void;   // data = { name, ...params }
@@ -212,10 +451,56 @@ export interface PresetBuilderCtx {
   onReorder: (from: number, to: number) => void;
 }
 
+function AnimatedPresetList({
+  presets, editingId, dragIndex, overIndex, onSelect, onDragStart, onDragOver, onDrop, onDragEnd,
+}: {
+  presets: Preset[];
+  editingId: string | null;
+  dragIndex: number | null;
+  overIndex: number | null;
+  onSelect: (id: string) => void;
+  onDragStart: (index: number) => (event: React.DragEvent) => void;
+  onDragOver: (index: number) => (event: React.DragEvent) => void;
+  onDrop: (index: number) => (event: React.DragEvent) => void;
+  onDragEnd: () => void;
+}) {
+  return (
+    <ui.AnimatedList
+      items={presets}
+      getKey={(preset) => preset.id}
+      className="se-preset-list-motion"
+      itemClassName="se-preset-list-motion-item"
+      empty={<div className="se-preset-list-empty">暂无预设</div>}
+      renderItem={(preset, index) => (
+          <button
+            type="button"
+            draggable
+            className={[
+              'se-preset-list-item',
+              editingId === preset.id ? 'active' : '',
+              dragIndex === index ? 'dragging' : '',
+              overIndex === index && dragIndex !== index ? 'drag-over' : '',
+            ].filter(Boolean).join(' ')}
+            onClick={() => onSelect(preset.id)}
+            onDragStart={onDragStart(index)}
+            onDragOver={onDragOver(index)}
+            onDrop={onDrop(index)}
+            onDragEnd={onDragEnd}
+            title={`${preset.name}（拖拽可调整顺序）`}
+          >
+            <span className="se-preset-grip" aria-hidden>⋮⋮</span>
+            <span className="se-preset-list-name">{preset.name}</span>
+          </button>
+      )}
+    />
+  );
+}
+
 // 预设管理弹窗外壳：最左侧预设列表 + 列表下方操作按钮（新建/复制/删除/导入/导出），右侧为编辑区（children）
 export function PresetManageDialog({
   title, presets, editingId, onSelect, onNew, onCopy, onDelete,
-  onImport, onExport, onReorder, onClose, onSave, saveLabel, canSave = true, compact = false, children,
+  onImport, onExport, onReorder, onClose, onExited, onSave, saveLabel, canSave = true, compact = false, closing = false, children,
+  scrollEditor = false,
 }: {
   title: string;
   presets: Preset[];
@@ -228,11 +513,15 @@ export function PresetManageDialog({
   onExport: () => void;
   onReorder: (from: number, to: number) => void;
   onClose: () => void;
+  onExited: () => void;
   onSave: () => void;
   saveLabel: string;
   canSave?: boolean;
   /** 窄版：用于字段较少的功能（检测/截图等），宽度贴合内容，避免右侧大空白 */
   compact?: boolean;
+  /** 非编码编辑器共用单一滚动容器，保证名称行与参数分组右边界一致。 */
+  scrollEditor?: boolean;
+  closing?: boolean;
   children: React.ReactNode;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -279,8 +568,14 @@ export function PresetManageDialog({
   };
 
   return (
-    <div className="se-dialog-backdrop" onClick={onClose}>
-      <div className={`se-dialog se-preset-dialog${compact ? ' se-preset-dialog--compact' : ''}`} onClick={(e) => e.stopPropagation()}>
+    <div className={`se-dialog-backdrop${closing ? ' is-closing' : ''}`} onClick={onClose}>
+      <div
+        className={`se-dialog se-preset-dialog${compact ? ' se-preset-dialog--compact' : ''}${scrollEditor ? ' se-preset-dialog--scroll-edit' : ''}${closing ? ' is-closing' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+        onAnimationEnd={(event) => {
+          if (event.target === event.currentTarget && closing && event.animationName === 'se-dialog-out') onExited();
+        }}
+      >
         <div className="se-dialog-head">
           <span className="se-dialog-title">{title}</span>
           <button className="se-dialog-close" onClick={onClose} title="关闭">
@@ -292,29 +587,17 @@ export function PresetManageDialog({
             <aside className="se-preset-list-panel">
               <div className="se-preset-list-title">预设列表</div>
               <div className="se-preset-list">
-                {presets.length === 0 && <div className="se-preset-list-empty">暂无预设</div>}
-                {presets.map((p, i) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    draggable
-                    className={[
-                      'se-preset-list-item',
-                      editingId === p.id ? 'active' : '',
-                      dragIndex === i ? 'dragging' : '',
-                      overIndex === i && dragIndex !== i ? 'drag-over' : '',
-                    ].filter(Boolean).join(' ')}
-                    onClick={() => onSelect(p.id)}
-                    onDragStart={onDragStart(i)}
-                    onDragOver={onDragOver(i)}
-                    onDrop={onDrop(i)}
-                    onDragEnd={onDragEnd}
-                    title={`${p.name}（拖拽可调整顺序）`}
-                  >
-                    <span className="se-preset-grip" aria-hidden>⋮⋮</span>
-                    <span className="se-preset-list-name">{p.name}</span>
-                  </button>
-                ))}
+                <AnimatedPresetList
+                  presets={presets}
+                  editingId={editingId}
+                  dragIndex={dragIndex}
+                  overIndex={overIndex}
+                  onSelect={onSelect}
+                  onDragStart={onDragStart}
+                  onDragOver={onDragOver}
+                  onDrop={onDrop}
+                  onDragEnd={onDragEnd}
+                />
               </div>
               <div className="se-preset-list-actions">
                 <ui.Button className="se-btn-new" onClick={onNew} icon={<IconPlus size={15} />} title="新建空白预设">新建</ui.Button>
@@ -342,13 +625,68 @@ export function PresetManageDialog({
   );
 }
 
-// 通用预设构建器（schema 驱动），用于除 encode 外的所有功能
+type GenericPresetGroupSpec = {
+  id: string;
+  title: string;
+  rowIds: string[];
+  toggleKey?: 'lnOn' | 'tpOn';
+  checkboxKeys?: Array<'recursive' | 'blackDetect'>;
+  layout?: 'alpha';
+};
+
+// 与各功能主界面的参数分组保持一致；编码预设继续使用专属双栏构建器。
+const GENERIC_PRESET_GROUPS: Partial<Record<PresetType, GenericPresetGroupSpec[]>> = {
+  mix: [
+    { id: 'loudness', title: '响度标准化 (EBU R128)', rowIds: ['field-lnI', 'field-lnTp', 'field-lnLra'], toggleKey: 'lnOn' },
+    { id: 'compand', title: '动态压缩 (Compand)', rowIds: ['field-cpTh', 'field-cpGain'], toggleKey: 'tpOn' },
+  ],
+  check: [
+    { id: 'reference', title: '编码规范参照', rowIds: ['reference-encode-preset'] },
+    { id: 'rules', title: '检测规则', rowIds: ['field-fpsTol'], checkboxKeys: ['recursive', 'blackDetect'] },
+  ],
+  alpha: [
+    { id: 'frame-rate', title: '帧率设置', rowIds: [], layout: 'alpha' },
+  ],
+  screenshot: [
+    { id: 'aspect', title: '选取比例', rowIds: ['field-aspect', 'custom-ratio'] },
+    { id: 'dimensions', title: '输出尺寸', rowIds: ['resolution'] },
+  ],
+  segment: [
+    { id: 'range', title: '时间范围', rowIds: ['fixed-duration'] },
+    { id: 'aspect', title: '选取比例', rowIds: ['field-aspect', 'custom-ratio'] },
+    { id: 'output', title: '输出参数 (片段)', rowIds: ['resolution', 'clip-encode-preset'] },
+  ],
+  gif: [
+    { id: 'range', title: '时间范围', rowIds: ['fixed-duration'] },
+    { id: 'aspect', title: '选取比例', rowIds: ['field-aspect', 'custom-ratio'] },
+    { id: 'output', title: '输出参数 (GIF)', rowIds: ['resolution', 'field-fps', 'field-gifCompression'] },
+  ],
+  webp: [
+    { id: 'range', title: '时间范围', rowIds: ['fixed-duration'] },
+    { id: 'aspect', title: '选取比例', rowIds: ['field-aspect', 'custom-ratio'] },
+    { id: 'output', title: '输出参数 (WebP)', rowIds: ['resolution', 'field-fps', 'field-quality'] },
+  ],
+};
+
+// 通用预设构建器（schema 驱动），用于无需专属编辑器的非编码功能。
 function GenericPresetBuilder({ type, ctx, initial }: {
   type: PresetType; ctx: PresetBuilderCtx; initial?: Record<string, any>;
 }) {
   const schema = PRESET_SCHEMAS[type as Exclude<PresetType, 'encode'>] || [];
+  const uiType = type as SharedPresetUiType;
   const encPresets = usePresets('encode'); // 检测功能可选编码预设为规范基准
-  const makeNew = () => Object.fromEntries(schema.map((d) => [d.key, initial && initial[d.key] !== undefined ? initial[d.key] : d.default]));
+  const normalizeEncodePresetId = (value: unknown) => {
+    const requested = typeof value === 'string' ? value : '';
+    return encPresets.presets.some((preset) => preset.id === requested)
+      ? requested
+      : '';
+  };
+  const makeNew = () => {
+    const values = Object.fromEntries(schema.map((d) => [d.key, initial && initial[d.key] !== undefined ? initial[d.key] : d.default]));
+    if (type === 'segment') values.clipPresetId = normalizeEncodePresetId(values.clipPresetId);
+    if (type === 'check') values.refEncPresetId = normalizeEncodePresetId(values.refEncPresetId);
+    return values;
+  };
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [form, setForm] = useState<Record<string, any>>(makeNew);
@@ -363,7 +701,10 @@ function GenericPresetBuilder({ type, ctx, initial }: {
     const p = ctx.presets.find((x) => x.id === id);
     if (!p) return;
     setEditingId(id);
-    setForm(Object.fromEntries(schema.map((d) => [d.key, p.params[d.key] !== undefined ? p.params[d.key] : d.default])));
+    const values = Object.fromEntries(schema.map((d) => [d.key, p.params[d.key] !== undefined ? p.params[d.key] : d.default]));
+    if (type === 'segment') values.clipPresetId = normalizeEncodePresetId(values.clipPresetId);
+    if (type === 'check') values.refEncPresetId = normalizeEncodePresetId(values.refEncPresetId);
+    setForm(values);
     setName(p.name);
   };
   const onCopy = () => { if (editingId) { setEditingId(null); setName((n) => (n ? `${n} 副本` : '副本')); } };
@@ -380,11 +721,178 @@ function GenericPresetBuilder({ type, ctx, initial }: {
     prevOpen.current = ctx.isOpen;
   }, [ctx.isOpen]);
 
-  if (!ctx.isOpen) return null;
+  if (!ctx.isMounted) return null;
+  const customRenderedKeys = new Set([
+    'lnOn', 'tpOn', 'fpsOriginal', 'recursive', 'blackDetect', 'fixedDur', 'fixedVal',
+    ...(type === 'alpha' ? ['fps'] : []),
+  ]);
+  const visibleSchema = schema
+    .filter((d) => d.key !== 'refEncPresetId' && d.key !== 'clipPresetId' && !OUTPUT_PRESET_KEYS.has(d.key))
+    .filter((d) => isPresetUiFieldVisible(uiType, d.key, form))
+    .filter((d) => !customRenderedKeys.has(d.key));
+  const fieldRows: ui.AnimatedFieldRow[] = [];
+  if (type === 'check') {
+    fieldRows.push({
+      id: 'reference-encode-preset',
+      content: (
+        <>
+          <ui.FieldLabel>对照预设</ui.FieldLabel>
+          <ui.ComboBox
+            value={form.refEncPresetId || ''}
+            options={encPresets.presets.length
+              ? [{ label: '不指定编码规范', value: '' }, ...encPresets.presets.map((p) => ({ label: p.name, value: p.id }))]
+              : [{ label: '无转码预设', value: '' }]}
+            onChange={(v) => set('refEncPresetId', v)}
+          />
+        </>
+      ),
+    });
+  }
+  if (type === 'segment') {
+    fieldRows.push({
+      id: 'clip-encode-preset',
+      content: (
+        <>
+          <ui.FieldLabel>编码预设</ui.FieldLabel>
+          <ui.ComboBox
+            value={form.clipPresetId || ''}
+            options={encPresets.presets.map((p) => ({
+              label: p.name,
+              value: p.id,
+              tags: p.params.container ? [String(p.params.container).toUpperCase()] : undefined,
+            }))}
+            onChange={(v) => set('clipPresetId', v)}
+            disabled={encPresets.presets.length === 0}
+            placeholder={encPresets.presets.length ? '请选择' : '没有可用的编码预设'}
+          />
+        </>
+      ),
+    });
+  }
+  if (type === 'segment' || type === 'gif' || type === 'webp') {
+    fieldRows.push({
+      id: 'fixed-duration',
+      content: (
+        <>
+          <ui.Checkbox checked={!!form.fixedDur} onChange={(value) => set('fixedDur', value)}>固定时长</ui.Checkbox>
+          <ui.NumberField
+            value={form.fixedVal}
+            min={0.1}
+            max={9999}
+            step={0.1}
+            suffix="s"
+            disabled={isPresetUiFieldDisabled(uiType, 'fixedVal', form)}
+            onChange={(value) => set('fixedVal', value)}
+          />
+        </>
+      ),
+    });
+  }
+  visibleSchema.forEach((d, index) => {
+    if (d.key === 'customRatio') {
+      const [rw, rh] = parseCustomRatioParts(form.customRatio);
+      fieldRows.push({
+        id: 'custom-ratio',
+        content: (
+          <>
+            <ui.FieldLabel>宽比</ui.FieldLabel>
+            <ui.IntField value={rw} min={1} max={99} onChange={(v) => set('customRatio', `${v}:${rh}`)} />
+            <ui.FieldLabel>高比</ui.FieldLabel>
+            <ui.IntField value={rh} min={1} max={99} onChange={(v) => set('customRatio', `${rw}:${v}`)} />
+          </>
+        ),
+      });
+      return;
+    }
+    const nextField = visibleSchema[index + 1];
+    if (d.key === 'w' && d.kind === 'int' && nextField?.key === 'h' && nextField.kind === 'int') {
+      const outputOriginal = d.label.includes('0=原始') || nextField.label.includes('0=原始');
+      const disabled = isPresetUiFieldDisabled(uiType, 'w', form);
+      fieldRows.push({
+        id: 'resolution',
+        content: (
+          <>
+            <ui.FieldLabel>{outputOriginal ? '分辨率 (0=原始)' : '分辨率 (长×宽)'}</ui.FieldLabel>
+            <div className="se-res-row">
+              <ui.IntField value={form.w} min={d.min ?? 0} max={d.max ?? 9999} suffix="px" disabled={disabled} onChange={onW} />
+              <span className="se-x">×</span>
+              <ui.IntField value={form.h} min={nextField.min ?? 0} max={nextField.max ?? 9999} suffix="px" disabled={disabled} onChange={onH} />
+            </div>
+          </>
+        ),
+      });
+      return;
+    }
+    if (d.key === 'h' && visibleSchema[index - 1]?.key === 'w') return;
+    const disabled = isPresetUiFieldDisabled(uiType, d.key, form);
+    fieldRows.push({
+      id: `field-${d.key}`,
+      content: (
+        <>
+          <ui.FieldLabel>{d.label}</ui.FieldLabel>
+          {d.kind === 'select' && (
+            <ui.ComboBox
+              value={form[d.key]}
+              options={d.options || []}
+              onChange={(v) => {
+                set(d.key, v);
+                if (d.key === 'aspect') {
+                  const r = aspectToRatio(v, form.customRatio);
+                  if (r && form.w > 0) set('h', linkAspectHeight(form.w, r));
+                }
+              }}
+            />
+          )}
+          {d.kind === 'int' && (
+            <ui.IntField
+              value={form[d.key]}
+              min={d.min ?? 0}
+              max={d.max ?? 9999}
+              disabled={disabled}
+              onChange={(v) => {
+                if (d.key === 'w') onW(v);
+                else if (d.key === 'h') onH(v);
+                else set(d.key, v);
+              }}
+            />
+          )}
+          {d.kind === 'number' && (
+            <ui.NumberField value={form[d.key]} min={d.min ?? 0} max={d.max ?? 9999} step={d.step ?? 1} suffix={d.hint} disabled={disabled} onChange={(v) => set(d.key, v)} />
+          )}
+          {d.kind === 'checkbox' && (
+            <ui.Checkbox checked={!!form[d.key]} onChange={(v) => set(d.key, v)}>{d.hint || '启用'}</ui.Checkbox>
+          )}
+          {d.kind === 'text' && (
+            <input className="se-drop-input" value={form[d.key]} onChange={(e) => set(d.key, e.target.value)} />
+          )}
+        </>
+      ),
+    });
+  });
+  const rowById = new Map(fieldRows.map((row) => [row.id, row]));
+  const groupedIds = new Set<string>();
+  const sections = (GENERIC_PRESET_GROUPS[type] ?? []).map((section) => {
+    const rows = section.rowIds.flatMap((id) => {
+      const row = rowById.get(id);
+      if (!row) return [];
+      groupedIds.add(id);
+      return [row];
+    });
+    return { ...section, rows };
+  }).filter((section) => (
+    section.rows.length > 0
+    || section.layout != null
+    || (section.checkboxKeys?.length ?? 0) > 0
+  ));
+  const remainingRows = fieldRows.filter((row) => !groupedIds.has(row.id));
+  if (remainingRows.length > 0) {
+    sections.push({ id: 'other', title: '参数设置', rowIds: [], rows: remainingRows });
+  }
   return (
     <PresetManageDialog
       title={`管理${TYPE_LABEL[type]}预设`}
       compact
+      scrollEditor
       presets={ctx.presets}
       editingId={editingId}
       onSelect={onSelect}
@@ -395,6 +903,8 @@ function GenericPresetBuilder({ type, ctx, initial }: {
       onExport={ctx.onExport}
       onReorder={ctx.onReorder}
       onClose={ctx.onClose}
+      onExited={ctx.onExited}
+      closing={ctx.closing}
       onSave={onSave}
       saveLabel={editingId ? '保存修改' : '保存预设'}
       canSave={!!String(name).trim()}
@@ -403,78 +913,72 @@ function GenericPresetBuilder({ type, ctx, initial }: {
         <ui.FieldLabel>预设名称</ui.FieldLabel>
         <input className="se-drop-input" value={name} placeholder="例如：广播响度" onChange={(e) => setName(e.target.value)} />
       </div>
-      <ui.FieldGrid>
-        {type === 'check' && (
-          <React.Fragment key="refEncPresetId">
-            <ui.FieldLabel>编码规范</ui.FieldLabel>
-            <ui.ComboBox
-              value={form.refEncPresetId || ''}
-              options={encPresets.presets.length
-                ? [{ label: '(不指定)', value: '' }, ...encPresets.presets.map((p) => ({ label: p.name, value: p.id }))]
-                : [{ label: '(无转码预设)', value: '' }]}
-              onChange={(v) => set('refEncPresetId', v)}
-            />
-          </React.Fragment>
-        )}
-        {schema
-          .filter((d) => d.key !== 'refEncPresetId' && !(d.key === 'customRatio' && form.aspect !== 'custom'))
-          .map((d) => {
-            // 自定义比例拆成两个输入框（宽比 / 高比），避免出现可删冒号的单文本框
-            if (d.key === 'customRatio') {
-              const [rw, rh] = parseCustomRatioParts(form.customRatio);
-              return (
-                <React.Fragment key={d.key}>
-                  <ui.FieldLabel>宽比</ui.FieldLabel>
-                  <ui.IntField value={rw} min={1} max={99} onChange={(v) => set('customRatio', `${v}:${rh}`)} />
-                  <ui.FieldLabel>高比</ui.FieldLabel>
-                  <ui.IntField value={rh} min={1} max={99} onChange={(v) => set('customRatio', `${rw}:${v}`)} />
-                </React.Fragment>
-              );
-            }
-            const disabled = (d.key === 'w' || d.key === 'h') && form.aspect === 'free';
-            return (
-          <React.Fragment key={d.key}>
-            <ui.FieldLabel>{d.label}</ui.FieldLabel>
-            {d.kind === 'select' && (
-              <ui.ComboBox
-                value={form[d.key]}
-                options={d.options || []}
-                onChange={(v) => {
-                  set(d.key, v);
-                  if (d.key === 'aspect') {
-                    const r = aspectToRatio(v, form.customRatio);
-                    if (r && form.w > 0) set('h', linkAspectHeight(form.w, r));
-                  }
-                }}
-              />
-            )}
-            {d.kind === 'int' && (
-              <ui.IntField
-                value={form[d.key]}
-                min={d.min ?? 0}
-                max={d.max ?? 9999}
-                disabled={disabled}
-                onChange={(v) => {
-                  if (d.key === 'w') onW(v);
-                  else if (d.key === 'h') onH(v);
-                  else set(d.key, v);
-                }}
-              />
-            )}
-            {d.kind === 'number' && (
-              <ui.NumberField value={form[d.key]} min={d.min ?? 0} max={d.max ?? 9999} step={d.step ?? 1} suffix={d.hint} onChange={(v) => set(d.key, v)} />
-            )}
-            {d.kind === 'checkbox' && (
-              <ui.Checkbox checked={!!form[d.key]} onChange={(v) => set(d.key, v)}>{d.hint || '启用'}</ui.Checkbox>
-            )}
-            {d.kind === 'text' && (
-              <input className="se-drop-input" value={form[d.key]} onChange={(e) => set(d.key, e.target.value)} />
-            )}
-          </React.Fragment>
-            );
-          })}
-      </ui.FieldGrid>
+      {sections.map((section) => (
+        <ui.ParamGroup
+          key={section.id}
+          title={section.title}
+          aside={section.toggleKey ? (
+            <ui.Checkbox checked={!!form[section.toggleKey]} onChange={(value) => set(section.toggleKey!, value)}>{''}</ui.Checkbox>
+          ) : undefined}
+        >
+          {section.layout === 'alpha' ? (
+            <>
+              <ui.Radio checked={form.fpsOriginal !== false} onToggle={() => set('fpsOriginal', true)}>保持原始帧率</ui.Radio>
+              <div className="se-btn-row">
+                <ui.Radio checked={form.fpsOriginal === false} onToggle={() => set('fpsOriginal', false)}>自定义帧率</ui.Radio>
+                <ui.NumberField
+                  value={form.fps}
+                  min={1}
+                  max={120}
+                  step={0.1}
+                  width={110}
+                  disabled={isPresetUiFieldDisabled(uiType, 'fps', form)}
+                  onChange={(value) => set('fps', value)}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              {section.rows.length > 0 && <ui.AnimatedFieldGrid rows={section.rows} />}
+              {section.checkboxKeys?.map((key) => (
+                <ui.Checkbox key={key} checked={!!form[key]} onChange={(value) => set(key, value)}>
+                  {key === 'recursive' ? '目录递归扫描' : '启用中间黑帧检测'}
+                </ui.Checkbox>
+              ))}
+            </>
+          )}
+        </ui.ParamGroup>
+      ))}
+      {type !== 'check' && type !== 'backup' && (
+        <OutputLocationGroup
+          value={form}
+          presetName={name}
+          extension={OUTPUT_PRESENTATION[type]?.extension}
+          defaultSuffix={OUTPUT_PRESENTATION[type]?.defaultSuffix}
+          onChange={(key, value) => set(key, value)}
+        />
+      )}
     </PresetManageDialog>
+  );
+}
+
+type PresetCardRow = { k: string; v: string };
+
+function PresetCardRows({ rows }: { rows: PresetCardRow[] }) {
+  return (
+    <ui.AnimatedList
+      items={rows}
+      getKey={(row) => row.k}
+      className="se-preset-kv-grid"
+      itemClassName="se-preset-kv-motion-item"
+      layout="flow"
+      renderItem={(row) => (
+        <div className="se-preset-kv">
+          <span className="se-preset-k">{row.k}</span>
+          <ui.AnimatedValue value={row.v} className="se-preset-v" />
+        </div>
+      )}
+    />
   );
 }
 
@@ -482,7 +986,7 @@ function GenericPresetBuilder({ type, ctx, initial }: {
 export function PresetCard({ type, params }: { type: PresetType; params: Record<string, any> | null }) {
   if (!params) return null;
   const p = params;
-  let rows: { k: string; v: string }[];
+  let rows: PresetCardRow[];
   if (type === 'encode') {
     const codecLabel = (VIDEO_CODEC_LABEL[p.videoCodec] as string) || p.videoCodec || '—';
     const prof = p.videoProfile ? ` / ${p.videoProfile}` : '';
@@ -518,6 +1022,9 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
       { k: '锐化', v: String(p.unsharp ?? '—') },
       { k: '降噪', v: String(p.denoise ?? '—') },
       { k: '风格', v: STYLE_LABEL[p.style] || String(p.style ?? '—') },
+      { k: '2-pass 编码', v: p.twoPass ? '开启' : '关闭' },
+      { k: '进度预览', v: p.previewDuringEncode === false ? '关闭' : '开启' },
+      { k: '存储位置', v: describeOutputSettings(p) },
     ];
   } else if (type === 'mix') {
     // 混音：开关关闭时隐藏对应子参数，卡片始终反映实际生效项
@@ -537,31 +1044,94 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
     } else {
       rows.push({ k: '动态压缩', v: '关' });
     }
+    rows.push({ k: '存储位置', v: describeOutputSettings(p) });
+  } else if (type === 'workflow') {
+    const workflow = normalizeWorkflowDefinition(p);
+    const counts = workflowNodeCounts(workflow.steps);
+    rows = [
+      { k: '触发方式', v: workflow.trigger.kind === 'removable' ? '新接入磁盘' : '手动执行' },
+      { k: '执行步骤', v: `${counts.actions} 个` },
+      { k: '逻辑判断', v: `${counts.conditions} 个` },
+    ];
+    if (workflow.trigger.kind === 'removable') {
+      rows.push({
+        k: '磁盘范围',
+        v: workflow.trigger.volumeKind === 'any' ? '任意新接入卷' : '可移动磁盘',
+      });
+      rows.push({
+        k: '卷标过滤',
+        v: workflow.trigger.labelContains.trim() || '不过滤',
+      });
+      rows.push({
+        k: '稳定等待',
+        v: `${workflow.trigger.settleSeconds} 秒`,
+      });
+    }
+  } else if (type === 'backup') {
+    const destinations = Array.isArray(p.destinations)
+      ? p.destinations
+        .map((value: unknown) => typeof value === 'object' && value !== null && 'path' in value
+          ? String((value as { path: unknown }).path || '')
+          : String(value || ''))
+        .filter((value: string) => value.trim())
+      : [];
+    const extensions = Array.isArray(p.extensions)
+      ? p.extensions.filter((value: unknown) => String(value || '').trim())
+      : [];
+    const filter = extensions.length > 0
+      ? extensions.join(' ')
+      : (p.mediaOnly === false ? '全部文件' : '媒体文件');
+    const destinationName = p.destinationNameMode === 'template'
+      ? (p.destinationNameTemplate || '名称模板')
+      : '原文件/目录名';
+    const rename = p.renameMode === 'template'
+      ? (p.renameTemplate || '名称模板')
+      : '保留原文件名';
+    const conflict = p.conflictStrategy === 'subdirectory'
+      ? `保存到 ${p.conflictSubdirectory || '冲突文件'} 子目录`
+      : `自动重命名 · ${p.conflictRenameTemplate || '{name}_{index}'}`;
+    rows = [
+      { k: '目标目录', v: destinations.length > 0 ? `${destinations.length} 个` : '未设置' },
+      { k: '文件过滤', v: filter },
+      { k: '最小体积', v: p.minSizeMb > 0 ? `${p.minSizeMb} MB` : '不限制' },
+      { k: '目录命名', v: destinationName },
+      { k: '目录结构', v: p.directoryStructure === 'flatten' ? '塌陷子目录' : '保留子目录结构' },
+      { k: '文件命名', v: rename },
+      { k: '冲突解决', v: conflict },
+      { k: '操作方式', v: p.operation === 'move' ? '移动' : '复制' },
+      { k: 'MD5 校验', v: p.verifyMd5 === false ? '关闭' : '开启' },
+    ];
   } else {
-    const isRatioType = type === 'screenshot' || type === 'gif' || type === 'webp';
+    const isRatioType = type === 'screenshot' || type === 'segment' || type === 'gif' || type === 'webp';
     const schema = PRESET_SCHEMAS[type as Exclude<PresetType, 'encode'>] || [];
-    rows = schema
-      .filter((d) => !(isRatioType && d.key === 'customRatio' && p.aspect !== 'custom'))
-      .map((d) => ({ k: d.label, v: fieldValueLabel(d, p[d.key]) }));
+    const visibleFields = schema
+      .filter((d) => !OUTPUT_PRESET_KEYS.has(d.key))
+      .filter((d) => !(isRatioType && d.key === 'customRatio' && p.aspect !== 'custom'));
+    rows = [];
+    for (let index = 0; index < visibleFields.length; index += 1) {
+      const field = visibleFields[index];
+      const nextField = visibleFields[index + 1];
+      if (field.key === 'w' && nextField?.key === 'h') {
+        rows.push({ k: '分辨率', v: `${p.w ?? '—'}×${p.h ?? '—'}` });
+        index += 1;
+        continue;
+      }
+      rows.push({ k: field.label, v: fieldValueLabel(field, p[field.key]) });
+    }
     // 检测功能：扩展显示编码规范对照项（由 CheckTab 通过 currentParams 传入）
     if (type === 'check') {
       if (p.refEncName) rows.push({ k: '对照预设', v: p.refEncName });
       if (p.refEncCodec) rows.push({ k: '期望编码器', v: p.refEncCodec });
       if (p.refEncRes) rows.push({ k: '期望分辨率', v: p.refEncRes });
       if (p.refEncFps > 0) rows.push({ k: '期望帧率', v: `${p.refEncFps} fps` });
+    } else {
+      rows.push({ k: '存储位置', v: describeOutputSettings(p) });
     }
   }
 
   return (
     <div className="se-preset-card">
-      <div className="se-preset-kv-grid">
-        {rows.map((r, i) => (
-          <div className="se-preset-kv" key={i}>
-            <span className="se-preset-k">{r.k}</span>
-            <span className="se-preset-v">{r.v}</span>
-          </div>
-        ))}
-      </div>
+      <PresetCardRows rows={rows} />
     </div>
   );
 }
@@ -571,7 +1141,7 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
 // 增删改查（新建/复制/编辑/删除/导入/导出）统一在「管理预设」弹窗内完成
 export function PresetManager({ type, onApply, builderTitle, initialValues, currentParams, renderBuilder }: {
   type: PresetType;
-  onApply: (params: any) => void;
+  onApply: (params: any, presetName?: string) => void;
   builderTitle?: string;
   initialValues?: Record<string, any>;
   /** 当前面板里实际会用于处理的参数（实时值）；传入后卡片展示实时值，并启用「更新当前预设」 */
@@ -579,33 +1149,89 @@ export function PresetManager({ type, onApply, builderTitle, initialValues, curr
   renderBuilder?: (ctx: PresetBuilderCtx) => React.ReactNode;
 }) {
   const { presets, addPreset, removePreset, updatePreset, reorder, mergePresets, exportAll } = usePresets(type);
-  const [selId, setSelId] = useState<string | null>(presets[0]?.id ?? null);
+  const [selId, setSelId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const onApplyRef = useRef(onApply);
+  const appliedPresetRef = useRef('');
+
+  useEffect(() => {
+    onApplyRef.current = onApply;
+  }, [onApply]);
 
   const sel = presets.find((p) => p.id === selId) ?? null;
-  const options = presets.length
-    ? presets.map((p) => ({ label: p.name, value: p.id }))
-    : [{ label: '(无预设)', value: '' }];
+  const options = [
+    { label: '未选择预设', value: '' },
+    ...presets.map((p) => ({ label: p.name, value: p.id })),
+  ];
 
   const onPick = (id: string) => {
+    if (!id) {
+      setSelId(null);
+      appliedPresetRef.current = '';
+      onApply({}, '');
+      return;
+    }
     setSelId(id);
-    if (!id) return;
     const p = presets.find((x) => x.id === id);
-    if (p) onApply(p.params);
+    if (p) {
+      appliedPresetRef.current = presetApplyFingerprint(p);
+      onApply(p.params, p.name);
+    }
   };
 
-  // 将面板当前的实时参数写回所选预设（无需打开管理弹窗）
+  useEffect(() => {
+    if (!selId) return;
+    const selected = presets.find((preset) => preset.id === selId);
+    if (!selected) {
+      appliedPresetRef.current = '';
+      setSelId(null);
+      onApplyRef.current({}, '');
+      return;
+    }
+    const fingerprint = presetApplyFingerprint(selected);
+    if (fingerprint === appliedPresetRef.current) return;
+    appliedPresetRef.current = fingerprint;
+    onApplyRef.current(selected.params, selected.name);
+  }, [presets, selId]);
+
+  // 将面板当前的实时参数写回所选预设；未选择时新建一个同名规则的预设。
   const onUpdateCurrent = () => {
-    if (!selId || !currentParams) return;
+    if (!currentParams) return;
+    if (!selId) {
+      const preset: Preset = {
+        id: genId(),
+        name: `预设 ${presets.length + 1}`,
+        type,
+        params: currentParams,
+      };
+      addPreset(preset);
+      setSelId(preset.id);
+      appliedPresetRef.current = presetApplyFingerprint({ ...preset, revision: 1 });
+      onApply(preset.params, preset.name);
+      return;
+    }
     const p = presets.find((x) => x.id === selId);
     if (!p) return;
+    appliedPresetRef.current = presetApplyFingerprint({
+      ...p,
+      params: currentParams,
+      revision: (p.revision ?? 1) + 1,
+    });
     updatePreset(selId, currentParams, p.name);
-    onApply(currentParams);
+    onApply(currentParams, p.name);
   };
 
   const ctx: PresetBuilderCtx = {
     isOpen: open,
-    onClose: () => setOpen(false),
+    isMounted: open || closing,
+    closing,
+    onClose: () => {
+      if (!open) return;
+      setOpen(false);
+      setClosing(true);
+    },
+    onExited: () => setClosing(false),
     presets,
     onSaveNew: (raw: any) => {
       const { name: pName, ...params } = raw;
@@ -617,19 +1243,30 @@ export function PresetManager({ type, onApply, builderTitle, initialValues, curr
       };
       addPreset(preset);
       setSelId(preset.id);
-      onApply(preset.params);
+      appliedPresetRef.current = presetApplyFingerprint({ ...preset, revision: 1 });
+      onApply(preset.params, preset.name);
     },
     onUpdate: (id: string, raw: any) => {
       const { name: pName, ...params } = raw;
+      const current = presets.find((preset) => preset.id === id);
+      const nextName = String(pName || '').trim() || current?.name || '未命名预设';
+      if (id === selId && current) {
+        appliedPresetRef.current = presetApplyFingerprint({
+          ...current,
+          name: nextName,
+          params,
+          revision: (current.revision ?? 1) + 1,
+        });
+      }
       updatePreset(id, params, pName);
-      if (id === selId) onApply(params);
+      if (id === selId) onApply(params, nextName);
     },
     onRemove: (id: string) => {
       removePreset(id);
       if (id === selId) {
-        const next = presets.filter((p) => p.id !== id)[0] ?? null;
-        setSelId(next ? next.id : null);
-        if (next) onApply(next.params);
+        setSelId(null);
+        appliedPresetRef.current = '';
+        onApply({}, '');
       }
     },
     onImport: (list: Preset[]) => mergePresets(list),
@@ -648,12 +1285,12 @@ export function PresetManager({ type, onApply, builderTitle, initialValues, curr
         <span className="se-count-chip">{presets.length}</span>
       </div>
       <div className="se-preset-panel-body">
-        <ui.ComboBox value={selId ?? ''} options={options} onChange={onPick} />
+        <ui.ComboBox value={selId ?? ''} options={options} onChange={onPick} placeholder="未选择预设" />
         <PresetCard type={type} params={currentParams ?? sel?.params ?? null} />
       </div>
       <div className="se-preset-foot">
-        <ui.Button className="se-btn-new" onClick={() => setOpen(true)} icon={<IconSettings size={15} />} title="管理预设">管理预设</ui.Button>
-        <ui.Button className="se-btn-new" onClick={onUpdateCurrent} disabled={!selId || !currentParams} icon={<IconCheckShield size={15} />} title="将面板当前的实时参数保存到所选预设">更新当前预设</ui.Button>
+        <ui.Button className="se-btn-new" onClick={() => { setClosing(false); setOpen(true); }} icon={<IconSettings size={15} className="se-preset-manage-icon" />} title="管理预设">管理预设</ui.Button>
+        <ui.Button className="se-btn-new" onClick={onUpdateCurrent} disabled={!currentParams} icon={<IconCheckShield size={15} />} title={selId ? '将面板当前的实时参数保存到所选预设' : '将面板当前的实时参数保存为新预设'}>{selId ? '更新当前预设' : '保存为预设'}</ui.Button>
       </div>
       {builder}
     </div>
