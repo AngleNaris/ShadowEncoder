@@ -4844,6 +4844,10 @@ fn agent_request(
 }
 
 fn main() {
+    if std::env::args_os().any(|argument| argument == "--portable-verify-runtime") {
+        return;
+    }
+
     tauri::Builder::default()
         .manage(mpv_player::MpvState::default())
         .setup(|app| {

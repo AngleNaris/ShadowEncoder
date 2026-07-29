@@ -10,6 +10,7 @@
     "build": "tsc && vite build",
     "build:cli": "node scripts/stage-agent-cli.mjs",
     "package:windows": "npm run build:cli && tauri build --config src-tauri/tauri.windows.conf.json",
+    "package:portable": "npm run package:windows && node scripts/package-portable.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

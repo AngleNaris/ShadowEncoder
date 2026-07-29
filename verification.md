@@ -26,6 +26,7 @@
 | `cargo check --manifest-path app/src-tauri/Cargo.toml` | 通过 | 使用隔离目标目录 `app/src-tauri/target-agent-check` 完成 Tauri/Rust 编译检查 |
 | `cargo test --manifest-path app/src-tauri/Cargo.toml --bin shadowencoder` | 26 通过、1 忽略 | DIT 真实复制/MD5/取消、GIF 透明与压缩参数、Agent IPC、既有后端逻辑 |
 | `cd app && npm run package:windows` | 通过 | CLI sidecar、Tauri release 主程序、MSI 与 NSIS 安装包 |
+| `cd app && node scripts/package-portable.mjs` | 通过 | NSIS 单文件便携版，静态 Gifski 与全部应用自带运行时 |
 | `git diff --check` | 通过 | 空白符与补丁格式 |
 
 构建仍有既存的单个 JS chunk 超过 500 kB 警告，不影响本轮构建结果。
@@ -49,9 +50,11 @@
 | `ShadowEncoder_2.2.0_x64_en-US.msi` | 124,567,552 字节 | `0F44F6FB5E0C3780EA311DC5B5AFD5D92E6FCA202B825243693D3B66A645B196` |
 | `ShadowEncoder_2.2.0_x64-setup.exe` | 91,001,324 字节 | `C6372D496AFE549BABE4CE8FCA6A9F3BA35DFC95517FF34068C1A1B97AD78E9D` |
 | `shadowencoder.exe` | 14,409,216 字节 | `416A6454AF4C798FBA2540B6CF8D4ED339F97F934467573FA03ABB3928E63B89` |
+| `ShadowEncoder_2.2.0_x64-portable.exe` | 90,653,604 字节 | `17633427E435D559C048822FB7F58FD32FBBCCB997E1BA2557DF6A21A9E59E5F` |
 
 - NSIS 安装包和主程序的文件版本、产品版本均为 `2.2.0`。
 - MSI、NSIS 和主程序均未使用 Authenticode 证书签名，发布说明已注明 SmartScreen 风险。
+- 便携版 `--portable-verify` 返回 0：64 位主程序成功装载 libmpv，FFmpeg、FFprobe、CLI 均从自解压目录实际运行，退出后残留 payload 文件数为 0。
 
 ## 用户手动 UI 验证
 
