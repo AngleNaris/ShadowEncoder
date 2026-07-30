@@ -1,0 +1,105 @@
+<svg width="1180" height="330" viewBox="0 0 1180 330" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DIT 流程示意">
+  <defs>
+    <linearGradient id="wbg" x1="0" y1="0" x2="0" y2="330" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d0b11"/>
+      <stop offset="1" stop-color="#15131a"/>
+    </linearGradient>
+    <linearGradient id="node" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1921"/>
+      <stop offset="1" stop-color="#15131a"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto">
+      <path d="M0 0 L9 4.5 L0 9 z" fill="#6d5da5"/>
+    </marker>
+    <marker id="arrowg" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto">
+      <path d="M0 0 L9 4.5 L0 9 z" fill="#35c37c"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="330" fill="url(#wbg)"/>
+  <rect x="0" y="0" width="1180" height="3" fill="#6d5da5" opacity="0.5"/>
+
+  <g font-family="'Segoe UI', system-ui, sans-serif">
+    <!-- title -->
+    <rect x="32" y="28" width="4" height="18" fill="#6d5da5"/>
+    <text x="46" y="43" font-size="16" font-weight="700" fill="#ece8f2">DIT 流程 · 插盘即跑的可复用流水线</text>
+
+    <!-- Trigger -->
+    <g>
+      <rect x="32" y="78" width="176" height="86" fill="url(#node)" stroke="#6d5da5"/>
+      <rect x="32" y="78" width="4" height="86" fill="#6d5da5"/>
+      <text x="50" y="106" font-size="11" fill="#8d8498" letter-spacing="1">触发</text>
+      <text x="50" y="130" font-size="16" font-weight="700" fill="#a89ccf">插入可移动卷</text>
+      <text x="50" y="151" font-size="12" fill="#c6bfd1">按卷标匹配 · 稳定后启动</text>
+    </g>
+
+    <!-- Condition (diamond-ish, zero radius) -->
+    <g>
+      <rect x="268" y="66" width="196" height="110" fill="url(#node)" stroke="#6d5da5"/>
+      <rect x="268" y="66" width="4" height="110" fill="#6d5da5"/>
+      <text x="288" y="92" font-size="11" fill="#8d8498" letter-spacing="1">条件</text>
+      <text x="288" y="116" font-size="15" font-weight="700" fill="#a89ccf">目标空间够吗？</text>
+      <text x="288" y="138" font-size="11" fill="#8d8498">来源有媒体 · 空间充足</text>
+      <text x="288" y="156" font-size="11" fill="#8d8498">上一步成功 · MD5 已校验</text>
+    </g>
+
+    <!-- THEN branch -->
+    <g>
+      <rect x="524" y="40" width="196" height="72" fill="url(#node)" stroke="#35c37c"/>
+      <rect x="524" y="40" width="4" height="72" fill="#35c37c"/>
+      <text x="544" y="64" font-size="11" fill="#35c37c" letter-spacing="1">THEN</text>
+      <text x="544" y="88" font-size="15" font-weight="700" fill="#ece8f2">DIT · 备份</text>
+      <text x="544" y="105" font-size="11" fill="#8d8498">多目标 · MD5 校验</text>
+    </g>
+    <g>
+      <rect x="524" y="128" width="196" height="60" fill="url(#node)" stroke="#605870"/>
+      <rect x="524" y="128" width="4" height="60" fill="#605870"/>
+      <text x="544" y="152" font-size="11" fill="#8d8498" letter-spacing="1">ELSE</text>
+      <text x="544" y="174" font-size="13" fill="#c6bfd1">跳过 / 停止</text>
+    </g>
+
+    <!-- Action chain -->
+    <g>
+      <rect x="780" y="40" width="176" height="60" fill="url(#node)" stroke="#6d5da5"/>
+      <rect x="780" y="40" width="4" height="60" fill="#6d5da5"/>
+      <text x="798" y="66" font-size="14" font-weight="700" fill="#ece8f2">批量 · 转码</text>
+      <text x="798" y="86" font-size="11" fill="#8d8498">套用编码预设</text>
+    </g>
+    <g>
+      <rect x="780" y="116" width="176" height="60" fill="url(#node)" stroke="#6d5da5"/>
+      <rect x="780" y="116" width="4" height="60" fill="#6d5da5"/>
+      <text x="798" y="142" font-size="14" font-weight="700" fill="#ece8f2">批量 · 检测</text>
+      <text x="798" y="162" font-size="11" fill="#8d8498">媒体信息核对</text>
+    </g>
+    <g>
+      <rect x="1000" y="78" width="148" height="60" fill="url(#node)" stroke="#6d5da5"/>
+      <rect x="1000" y="78" width="4" height="60" fill="#6d5da5"/>
+      <text x="1018" y="104" font-size="14" font-weight="700" fill="#ece8f2">批量 · 混音</text>
+      <text x="1018" y="124" font-size="11" fill="#8d8498">完成</text>
+    </g>
+
+    <!-- connectors -->
+    <g stroke="#6d5da5" stroke-width="1.6" fill="none">
+      <path d="M208 121 H268" marker-end="url(#arrow)"/>
+      <path d="M464 100 H524" marker-end="url(#arrowg)" stroke="#35c37c"/>
+      <path d="M464 150 H524" marker-end="url(#arrow)"/>
+      <path d="M720 76 H780" marker-end="url(#arrow)"/>
+      <path d="M780 146 H752 V76" marker-end="url(#arrow)"/>
+      <path d="M956 70 H978 V108 H1000" marker-end="url(#arrow)"/>
+    </g>
+
+    <!-- footnote -->
+    <text x="32" y="236" font-size="12" fill="#8d8498">每个动作节点绑定一个预设，失败时可选择「停止」或「继续」；条件分支最深可嵌套 3 层。</text>
+    <text x="32" y="258" font-size="12" fill="#8d8498">备份、转码、检测、混音四类步骤自由编排——插上盘、点一下启动，剩下的它自己往下走。</text>
+
+    <!-- legend -->
+    <g font-size="11">
+      <rect x="32" y="288" width="12" height="12" fill="none" stroke="#35c37c"/>
+      <text x="52" y="298" fill="#8d8498">条件成立分支</text>
+      <rect x="168" y="288" width="12" height="12" fill="none" stroke="#605870"/>
+      <text x="188" y="298" fill="#8d8498">条件不成立分支</text>
+      <rect x="320" y="288" width="12" height="12" fill="none" stroke="#6d5da5"/>
+      <text x="340" y="298" fill="#8d8498">动作 / 触发 / 条件节点</text>
+    </g>
+  </g>
+</svg>

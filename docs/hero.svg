@@ -1,0 +1,109 @@
+<svg width="1280" height="360" viewBox="0 0 1280 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ShadowEncoder">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d0b11"/>
+      <stop offset="0.55" stop-color="#12101a"/>
+      <stop offset="1" stop-color="#1b1921"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7e6fb6" stop-opacity="0.55"/>
+      <stop offset="0.6" stop-color="#6d5da5" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#6d5da5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="word" x1="150" y1="150" x2="760" y2="215" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f2f0f8"/>
+      <stop offset="0.55" stop-color="#c9bff0"/>
+      <stop offset="1" stop-color="#a89ccf"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="150" y1="128" x2="234" y2="212" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7e6fb6"/>
+      <stop offset="1" stop-color="#4b3f78"/>
+    </linearGradient>
+    <linearGradient id="ray" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#cdc3f8" stop-opacity="0"/>
+      <stop offset="0.45" stop-color="#b2a2ed" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#7e69d3" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <filter id="blur2" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="1.1"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="360" fill="url(#bg)"/>
+
+  <!-- faint three-column layout echo: 素材 | 参数 | 预览 -->
+  <g stroke="#2a2731" stroke-width="1" opacity="0.6">
+    <line x1="320" y1="40" x2="320" y2="320"/>
+    <line x1="800" y1="40" x2="800" y2="320"/>
+  </g>
+  <g fill="#15131a" opacity="0.5">
+    <rect x="344" y="70" width="180" height="10"/>
+    <rect x="344" y="96" width="120" height="10"/>
+    <rect x="344" y="140" width="200" height="10"/>
+    <rect x="344" y="166" width="150" height="10"/>
+    <rect x="344" y="210" width="180" height="10"/>
+    <rect x="824" y="70" width="220" height="200"/>
+  </g>
+
+  <!-- glow behind the mark -->
+  <circle cx="192" cy="170" r="150" fill="url(#glow)" filter="url(#blur)"/>
+
+  <!-- brand rays -->
+  <g transform="translate(192 170)" filter="url(#blur2)">
+    <rect x="-1.1" y="-116" width="2.2" height="46" rx="1" fill="url(#ray)" opacity="0.62" transform="rotate(-24)"/>
+    <rect x="-1.1" y="-120" width="2.2" height="54" rx="1" fill="url(#ray)" opacity="0.42" transform="rotate(-8)"/>
+    <rect x="-1.1" y="-112" width="2.2" height="40" rx="1" fill="url(#ray)" opacity="0.55" transform="rotate(12)"/>
+    <rect x="-1.1" y="-122" width="2.2" height="58" rx="1" fill="url(#ray)" opacity="0.38" transform="rotate(30)"/>
+    <rect x="-1.1" y="-110" width="2.2" height="38" rx="1" fill="url(#ray)" opacity="0.5" transform="rotate(-44)"/>
+    <rect x="-1.1" y="-118" width="2.2" height="50" rx="1" fill="url(#ray)" opacity="0.34" transform="rotate(52)"/>
+  </g>
+
+  <!-- logo mark: zero-radius square, S glyph -->
+  <g>
+    <rect x="150" y="128" width="84" height="84" fill="url(#mark)" stroke="#a89ccf" stroke-opacity="0.5"/>
+    <rect x="150" y="128" width="84" height="84" fill="none" stroke="#0d0b11" stroke-opacity="0.35"/>
+    <path d="M208 152 H176 a10 10 0 0 0 0 20 h32 a10 10 0 0 1 0 20 H176"
+          fill="none" stroke="#f2f0f8" stroke-width="7" stroke-linecap="square"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="286" y="182" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="72" font-weight="700" letter-spacing="-1" fill="url(#word)">ShadowEncoder</text>
+
+  <!-- accent bar + tagline (echoes the 3px purple bar before section titles) -->
+  <rect x="288" y="214" width="4" height="22" fill="#6d5da5"/>
+  <text x="304" y="231" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="21" fill="#c6bfd1">把素材丢进来，拿到想要的结果就走 · 一个窗口，一整套媒体流程</text>
+
+  <!-- feature chips -->
+  <g font-family="'Segoe UI', system-ui, sans-serif" font-size="14" font-weight="600">
+    <g>
+      <rect x="288" y="262" width="92" height="30" fill="#1b1921" stroke="#6d5da5" stroke-opacity="0.55"/>
+      <text x="334" y="282" fill="#a89ccf" text-anchor="middle">转码</text>
+    </g>
+    <g>
+      <rect x="388" y="262" width="92" height="30" fill="#1b1921" stroke="#6d5da5" stroke-opacity="0.55"/>
+      <text x="434" y="282" fill="#a89ccf" text-anchor="middle">GIF · WebP</text>
+    </g>
+    <g>
+      <rect x="488" y="262" width="92" height="30" fill="#1b1921" stroke="#6d5da5" stroke-opacity="0.55"/>
+      <text x="534" y="282" fill="#a89ccf" text-anchor="middle">透明通道</text>
+    </g>
+    <g>
+      <rect x="588" y="262" width="92" height="30" fill="#1b1921" stroke="#6d5da5" stroke-opacity="0.55"/>
+      <text x="634" y="282" fill="#a89ccf" text-anchor="middle">DIT 备份</text>
+    </g>
+    <g>
+      <rect x="688" y="262" width="92" height="30" fill="#1b1921" stroke="#6d5da5" stroke-opacity="0.55"/>
+      <text x="734" y="282" fill="#a89ccf" text-anchor="middle">流程</text>
+    </g>
+    <g>
+      <rect x="788" y="262" width="108" height="30" fill="#1b1921" stroke="#6d5da5" stroke-opacity="0.55"/>
+      <text x="842" y="282" fill="#a89ccf" text-anchor="middle">Agent CLI</text>
+    </g>
+  </g>
+
+  <!-- bottom hairline -->
+  <rect x="0" y="358" width="1280" height="2" fill="#6d5da5" opacity="0.5"/>
+</svg>
