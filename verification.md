@@ -58,14 +58,13 @@
 | `ShadowEncoder_2.2.0_x64_en-US.msi` | 124,563,456 字节 | `9D3DCA5D5D53B3235A2D414BEABD234CFB4154811E6D1D5F0484992C19EF93EF` |
 | `ShadowEncoder_2.2.0_x64-setup.exe` | 90,998,002 字节 | `015D52FA52BC378BE30CD6EB99925B6866E4D2CCD50D764D41BC40DDDC50FF65` |
 | `shadowencoder.exe` | 14,412,800 字节 | `098DBA47C3914680E8DE8A749DBBB4665E39F88CE7034D99EB54BDB2A4521142` |
-| `ShadowEncoder_2.2.0_x64-portable.exe` | 90,846,604 字节 | `6EEC1DE4A3C10448959D4143757150C95C2E90E9BBDD44E3A555776123C31E82` |
-| `ShadowEncoder_2.2.0_x64-portable-cmdfix.exe` | 90,842,529 字节 | `8EE7F20C5BC82C11FBFF97BEE2610A6C10D87577896286BCEFA99B863D464D5E` |
+| `ShadowEncoder_2.2.0_x64-portable.exe` | 90,842,529 字节 | `8EE7F20C5BC82C11FBFF97BEE2610A6C10D87577896286BCEFA99B863D464D5E` |
 
 - NSIS 安装包和主程序的文件版本、产品版本均为 `2.2.0`。
 - MSI、NSIS 和主程序均未使用 Authenticode 证书签名，发布说明已注明 SmartScreen 风险。
 - 便携版 `--portable-verify` 返回 0：64 位主程序成功装载 libmpv，FFmpeg、FFprobe、CLI 均从自解压目录实际运行，退出后残留 payload 文件数为 0。
 - FFmpeg/FFprobe 统一经 `media_command` 启动，Windows 使用 `CREATE_NO_WINDOW`；Rust 后端测试 26 项通过、1 项按环境忽略，独立防回归测试通过。
-- 标准便携版在本轮验证时正被用户运行，Windows 文件锁阻止同名覆盖；包含无窗口修复的 `cmdfix` 验收包已完成相同的 `--portable-verify` 自检。
+- 包含无窗口修复的正式便携版已完成 `--portable-verify` 自检。
 
 ## 用户手动 UI 验证
 
