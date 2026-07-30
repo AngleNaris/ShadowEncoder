@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -19,6 +21,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+fn media_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
 
 #[derive(Clone, Serialize)]
 struct Progress {
@@ -470,7 +481,7 @@ fn run_with_progress_source(
         processes.insert(key.clone(), active.clone());
     }
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = media_command("ffmpeg");
     cmd.args(["-progress", "pipe:2", "-nostats"])
         .args(args)
         .stderr(Stdio::piped());
@@ -685,7 +696,7 @@ fn null_device() -> &'static str {
 }
 
 fn probe_duration(path: &str) -> f32 {
-    let out = Command::new("ffprobe")
+    let out = media_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -729,7 +740,7 @@ fn display_dimensions_from_probe(probe: &Value) -> Option<(i32, i32)> {
 }
 
 fn probe_display_dimensions(path: &str) -> Result<(i32, i32), String> {
-    let output = Command::new("ffprobe")
+    let output = media_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -1060,7 +1071,7 @@ fn export_gif_with_gifski(
         "rgba".to_string(),
         "pipe:1".to_string(),
     ];
-    let mut command = Command::new("ffmpeg");
+    let mut command = media_command("ffmpeg");
     command
         .args(args)
         .stdout(Stdio::piped())
@@ -2086,7 +2097,7 @@ fn check_blocking(
             "normal",
             "等待检测",
         );
-        let out = Command::new("ffprobe")
+        let out = media_command("ffprobe")
             .args([
                 "-v",
                 "error",
@@ -2213,7 +2224,7 @@ fn check_blocking(
         }
         // 黑帧检测（启用时，检测开头是否有黑色帧）
         if black_detect {
-            let _b_out = Command::new("ffmpeg")
+            let _b_out = media_command("ffmpeg")
                 .args([
                     "-v",
                     "quiet",
@@ -3310,7 +3321,7 @@ async fn dit_backup(
 
 fn get_info_map(path: &str) -> std::collections::HashMap<String, Value> {
     let mut m = std::collections::HashMap::new();
-    let out = Command::new("ffprobe")
+    let out = media_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -3339,7 +3350,7 @@ fn get_info_map(path: &str) -> std::collections::HashMap<String, Value> {
 }
 
 fn get_video_info_blocking(path: String) -> Result<Value, String> {
-    let output = Command::new("ffprobe")
+    let output = media_command("ffprobe")
         .args([
             "-v",
             "quiet",
@@ -3871,7 +3882,7 @@ fn read_media_file_blocking(path: String) -> Result<Vec<u8>, String> {
 
 fn preview_frame_blocking(path: String, time_sec: f32, max_width: i32) -> Result<Vec<u8>, String> {
     let width = max_width.clamp(160, 1280);
-    let output = Command::new("ffmpeg")
+    let output = media_command("ffmpeg")
         .args([
             "-v",
             "error",
