@@ -4845,6 +4845,10 @@ fn agent_request(
 
 fn main() {
     if std::env::args_os().any(|argument| argument == "--portable-verify-runtime") {
+        if !cfg!(feature = "custom-protocol") {
+            eprintln!("portable runtime was built without the custom-protocol feature");
+            std::process::exit(2);
+        }
         return;
     }
 

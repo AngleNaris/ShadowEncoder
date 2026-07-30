@@ -78,6 +78,8 @@ ShadowEncoder 是一个 Windows 桌面应用，把日常做视频时那些零散
 
 程序自带一个 `shadowencoder-cli`，让 AI Agent 和图形界面读写的是同一份状态——不是各干各的。它的设计比较克制：每条命令只改一个字段或一个列表项，最近 20 步操作可以撤回（而且能感知冲突），任务进行中你随时能查看进度或者直接中止。
 
+CLI 是 ShadowEncoder 的 Agent 控制端，不是独立编码器。除 `help` 和版本查询外，使用 CLI 时必须先运行同版本的 ShadowEncoder。
+
 ```text
 shadowencoder-cli help
 ```

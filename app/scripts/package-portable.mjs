@@ -75,3 +75,14 @@ const build = spawnSync(makensis, args, {
 if (build.error) throw build.error;
 if (build.status !== 0) process.exit(build.status ?? 1);
 console.log(`Built portable package: ${output}`);
+
+const verify = spawnSync(output, ['--portable-verify'], {
+  cwd: outputDirectory,
+  stdio: 'inherit',
+});
+
+if (verify.error) throw verify.error;
+if (verify.status !== 0) {
+  throw new Error(`Portable package verification failed with exit code ${verify.status ?? 1}.`);
+}
+console.log(`Verified portable package: ${output}`);

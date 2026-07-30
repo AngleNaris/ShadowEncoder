@@ -1,6 +1,13 @@
 # ShadowEncoder 验证记录
 
-日期：2026-07-29
+日期：2026-07-30
+
+## 便携版生产协议修复
+
+- 根因：旧 Windows release 构建未启用 Cargo `custom-protocol` 特性，Tauri 因而加载开发地址 `http://127.0.0.1:1420`，在用户机器上显示“连接被拒绝”。
+- 修复：`package:windows` 显式传入 `--features custom-protocol`；`--portable-verify-runtime` 会拒绝缺少该特性的主程序；单文件便携包生成后自动执行完整自检。
+- 新便携包：90,845,668 字节，SHA-256 `CB8ABC84A146F6BAA2D3C3F21CC981699263EC262E28FCFAD98C32537F0999E0`；Cargo 指纹为 `["custom-protocol"]`，自动 `--portable-verify` 通过。
+- CLI 边界：CLI 在应用关闭时对 `status --json` 返回 `APP_NOT_RUNNING` 和退出码 2。它保留为安装包和便携包内的 Agent 控制端，不再作为可独立工作的 Release 附件分发。
 
 ## 本轮范围
 
