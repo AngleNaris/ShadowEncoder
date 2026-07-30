@@ -1,20 +1,7 @@
-__pycache__/
-*.pyc
-*.pyo
-
 # build artifacts
-build/
-build_*/
-dist/
-dist_*/
 **/target/
 **/target-*/
-*.spec.bak
-
-# PyInstaller
-*.manifest
 *.exe
-warn-*.txt
 
 # ffmpeg binaries (per-platform, not committed)
 ffmpeg/win/ffmpeg.exe
@@ -28,10 +15,6 @@ ffmpeg-8.1-essentials_build/bin/
 mpv/win/
 
 # temp / test
-tmp_check/
-tmp_check_*/
-tests/tmp_test*/
-tests/__pycache__/
 *.log
 
 # IDE
