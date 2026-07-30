@@ -20,14 +20,22 @@ test('参数卡片复用共享网格行动画并保留值更新动画', async ()
   assert.doesNotMatch(source, /<ui\.AnimatedHeight>/);
 });
 
-test('任务运行时锁定编辑入口，但保留素材滚动、结果切换和终止按钮', async () => {
-  const source = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
+test('任务运行时保留局部锁定和停止按钮，但不显示全局浮层', async () => {
+  const [source, tabsSource, ditSource, theme] = await Promise.all([
+    readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/tabs.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/DitTabs.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/styles/theme.css', import.meta.url), 'utf8'),
+  ]);
 
   assert.doesNotMatch(source, /setAttribute\('inert'/);
   assert.match(source, /<SharedFilesColumn disabled=\{task\.running\}/);
   assert.match(source, /className=\{`se-app\$\{task\.running \? ' is-task-running' : ''\}`\}/);
-  assert.match(source, /task\.running && \([\s\S]*className="se-task-lock"/);
-  assert.match(source, /className="se-task-lock-stop se-btn-with-icon"[\s\S]*task\.cancel\(\)/);
+  assert.match(source, /className="se-rail-item"[\s\S]*disabled=\{task\.running\}/);
+  assert.match(tabsSource, /onStop && running[\s\S]*className="se-process-stop"[\s\S]*onClick=\{onStop\}/);
+  assert.match(ditSource, /running \?[\s\S]*className="se-process-stop"[\s\S]*onClick=\{onStop\}/);
+  assert.doesNotMatch(source, /se-task-lock/);
+  assert.doesNotMatch(theme, /\.se-task-lock/);
 });
 
 test('结果视图切换图标使用偶数像素尺寸避免半像素偏移', async () => {

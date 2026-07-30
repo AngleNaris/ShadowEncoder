@@ -389,54 +389,6 @@ select option { background: var(--surface-2); color: var(--text); }
 /* 任务运行时仅锁定可变更任务上下文的区域。 */
 .se-app.is-task-running .se-params-scroll { pointer-events: none; user-select: none; }
 .se-app.is-task-running .se-resize-handle { pointer-events: none; }
-.se-task-lock {
-  position: fixed;
-  top: 12px;
-  left: 50%;
-  z-index: 1200;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: min(440px, calc(100vw - 24px));
-  padding: 8px 8px 8px 12px;
-  background: rgba(21, 19, 26, 0.96);
-  border: 1px solid var(--border-strong);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42);
-}
-.se-task-lock-dot {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  background: var(--warning);
-  box-shadow: 0 0 0 3px var(--warning-soft);
-}
-.se-task-lock-copy {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-.se-task-lock-copy strong { color: var(--text); font-size: 12px; font-weight: 600; }
-.se-task-lock-copy span {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-button.se-task-lock-stop {
-  flex: none;
-  border-color: rgba(224, 90, 79, 0.48);
-  color: var(--error);
-  background: var(--error-soft);
-}
-button.se-task-lock-stop:hover:not(:disabled) {
-  border-color: var(--error);
-  color: #fff;
-  background: rgba(224, 90, 79, 0.28);
-}
 
 /* 左侧导航轨 */
 .se-rail {

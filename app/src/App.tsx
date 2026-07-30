@@ -12,7 +12,7 @@ import { ColumnLayoutProvider, useColumnLayout } from "./lib/columnLayoutContext
 import { PresetStoreProvider } from "./components/presetSystem";
 import {
   IconAlpha, IconCheckShield, IconClip, IconClose, IconEncode,
-  IconExport, IconFolder, IconGif, IconList, IconMix, IconShot, IconStop, IconUpdate, IconWebp,
+  IconExport, IconFolder, IconGif, IconList, IconMix, IconShot, IconUpdate, IconWebp,
 } from "./components/icons";
 import { ThemeProvider } from "@mui/material/styles";
 import CssBaseline from "@mui/material/CssBaseline";
@@ -238,7 +238,6 @@ function AppShell() {
   const progressTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const progressWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastAgentProgressRef = useRef({ taskId: '', progress: 0 });
-  const cancelling = task.detail === '正在取消...' || task.detail === '正在等待当前步骤结束...';
 
   taskRef.current = task;
 
@@ -531,24 +530,6 @@ function AppShell() {
         {updateOpen && <UpdateDialog onClose={() => setUpdateOpen(false)} />}
       </div>
 
-      {task.running && (
-        <div className="se-task-lock" role="status" aria-live="polite" aria-labelledby="se-task-lock-title">
-          <span className="se-task-lock-dot" aria-hidden />
-          <div className="se-task-lock-copy">
-            <strong id="se-task-lock-title">{activeAgentTaskId ? 'Agent 任务执行中' : '任务执行中'}</strong>
-            <span>{task.detail}</span>
-          </div>
-          <button
-            type="button"
-            className="se-task-lock-stop se-btn-with-icon"
-            onClick={() => { void task.cancel(); }}
-            disabled={cancelling}
-          >
-            <IconStop size={15} />
-            {cancelling ? '正在终止...' : '终止任务'}
-          </button>
-        </div>
-      )}
     </div>
   );
 }
