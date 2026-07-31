@@ -66,9 +66,9 @@ test('切换比例不会通过素材初始化 effect 覆盖选区或预设反算
   assert.equal(source.match(/}, \[media\.info\]\);/g)?.length, 2);
 });
 
-test('截图/GIF/WebP/截取的预设 schema 共用默认尺寸且不携带内置预设', async () => {
+test('截图/GIF/WebP/序列帧/截取的预设 schema 共用默认尺寸且不携带内置预设', async () => {
   const source = await readFile(new URL('../src/components/presetSystem.tsx', import.meta.url), 'utf8');
-  assert.equal(source.match(/default: DEFAULT_EXPORT_DIMENSIONS\.width/g)?.length, 4);
-  assert.equal(source.match(/default: DEFAULT_EXPORT_DIMENSIONS\.height/g)?.length, 4);
+  assert.equal(source.match(/default: DEFAULT_EXPORT_DIMENSIONS\.width/g)?.length, 5);
+  assert.equal(source.match(/default: DEFAULT_EXPORT_DIMENSIONS\.height/g)?.length, 5);
   assert.doesNotMatch(source, /DEFAULT_PRESETS|shot-default-1|seg-default-1|gif-default-1|webp-default-1/);
 });

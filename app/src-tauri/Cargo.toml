@@ -1,6 +1,6 @@
 [package]
 name = "shadowencoder"
-version = "2.2.0"
+version = "2.2.1"
 description = "ShadowEncoder"
 edition = "2021"
 license = "AGPL-3.0-or-later"
@@ -18,6 +18,8 @@ base64 = "0.22"
 libc = "0.2"
 gifski = { version = "1.34.0", default-features = false, features = ["gifsicle"] }
 md-5 = "0.10"
+semver = "1"
+ureq = { version = "2.12", features = ["json"] }
 shadowencoder-agent-core = { path = "../agent-core" }
 shadowencoder-agent-protocol = { path = "../agent-protocol" }
 

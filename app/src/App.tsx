@@ -1,22 +1,23 @@
 // ShadowEncoder 主框架 —— 左侧导航轨 + 三列工作区：共享素材 | 工具参数 | 结果
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { EncodeTab, MixTab, CheckTab, AlphaTab, ScreenshotTab, ExportTab, TaskRunnerProvider, useTaskRunner } from "./components/tabs";
 import { DitBackupTab, DitWorkflowTab } from "./components/DitTabs";
 import { MediaPickerDialog } from "./components/MediaPickerDialog";
 import * as ui from "./components/ui";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { updateCheck, openPath } from "./lib/ffmpeg";
+import { updateCheck, openPath, openUrl } from "./lib/ffmpeg";
 import { FileListProvider, useFileList } from "./lib/fileListContext";
+import { isAudioVisualPath, isVideoPath } from "./lib/mediaExtensions";
 import { ColumnLayoutProvider, useColumnLayout } from "./lib/columnLayoutContext";
 import { PresetStoreProvider } from "./components/presetSystem";
 import {
-  IconAlpha, IconCheckShield, IconClip, IconClose, IconEncode,
-  IconExport, IconFolder, IconGif, IconList, IconMix, IconShot, IconUpdate, IconWebp,
+  IconAlpha, IconCheckShield, IconClip, IconClose, IconCopy, IconEncode,
+  IconExport, IconFolder, IconGif, IconList, IconMix, IconSettings, IconShot, IconUpdate, IconWebp,
 } from "./components/icons";
-import { ThemeProvider } from "@mui/material/styles";
-import CssBaseline from "@mui/material/CssBaseline";
-import { muiTheme } from "./lib/muiTheme";
+import { AppThemeProvider, useAppTheme } from "./lib/AppThemeProvider";
+import { normalizeThemeAccent } from "./lib/themeAccent";
+import type { ThemePreference } from "./lib/themePreference";
 import {
   cancelAgentTask,
   getAgentSnapshot,
@@ -26,26 +27,35 @@ import {
 } from "./lib/agentApi";
 import { waitForAgentTaskHandler } from "./lib/agentTaskBridge";
 import appIcon from "./assets/icon.svg";
+import { useModalLayerRegistration } from "./lib/modalLayer";
 
-type TabDef = { key: string; label: string; desc: string; icon: React.ReactNode; Comp: React.ComponentType };
+type TabDef = {
+  key: string;
+  label: string;
+  desc: string;
+  icon: React.ReactNode;
+  Comp: React.ComponentType;
+  acceptsFile?: (path: string) => boolean;
+};
 
 const NAV_GROUPS: { label: string; items: TabDef[] }[] = [
   {
     label: "批量",
     items: [
-      { key: "encode", label: "转码", desc: "按预设参数批量转码，输出 _se.mp4", icon: <IconEncode size={20} />, Comp: EncodeTab },
-      { key: "mix", label: "混音", desc: "EBU R128 响度标准化与动态压缩", icon: <IconMix size={20} />, Comp: MixTab },
-      { key: "check", label: "检测", desc: "校验分辨率、帧率、黑帧等规格", icon: <IconCheckShield size={20} />, Comp: CheckTab },
+      { key: "encode", label: "转码", desc: "按预设参数批量转码，自动避开同名文件", icon: <IconEncode size={20} />, Comp: EncodeTab, acceptsFile: isAudioVisualPath },
+      { key: "mix", label: "混音", desc: "EBU R128 响度标准化与动态压缩", icon: <IconMix size={20} />, Comp: MixTab, acceptsFile: isAudioVisualPath },
+      { key: "check", label: "检测", desc: "校验分辨率、帧率、黑帧等规格", icon: <IconCheckShield size={20} />, Comp: CheckTab, acceptsFile: isVideoPath },
     ],
   },
   {
     label: "工具",
     items: [
-      { key: "alpha", label: "透明通道", desc: "上半 RGB + 下半 Alpha → ProRes 4444", icon: <IconAlpha size={20} />, Comp: AlphaTab },
-      { key: "shot", label: "截图", desc: "按时间点与裁剪区域导出 PNG", icon: <IconShot size={20} />, Comp: ScreenshotTab },
-      { key: "clip", label: "截取", desc: "按时间范围导出 MOV / MP4 片段", icon: <IconClip size={20} />, Comp: () => <ExportTab format="clip" /> },
-      { key: "gif", label: "GIF", desc: "将片段导出为 GIF 动图", icon: <IconGif size={20} />, Comp: () => <ExportTab format="gif" /> },
-      { key: "webp", label: "WebP", desc: "将片段导出为 WebP 动图", icon: <IconWebp size={20} />, Comp: () => <ExportTab format="webp" /> },
+      { key: "alpha", label: "透明通道", desc: "上半 RGB + 下半 Alpha → ProRes 4444", icon: <IconAlpha size={20} />, Comp: AlphaTab, acceptsFile: isVideoPath },
+      { key: "shot", label: "截图", desc: "按时间点与裁剪区域导出图片", icon: <IconShot size={20} />, Comp: ScreenshotTab, acceptsFile: isVideoPath },
+      { key: "sequence", label: "序列帧", desc: "按时间范围导出 JPEG、PNG 等图片序列", icon: <IconCopy size={20} />, Comp: () => <ExportTab format="sequence" />, acceptsFile: isVideoPath },
+      { key: "clip", label: "截取", desc: "按时间范围导出 MOV / MP4 片段", icon: <IconClip size={20} />, Comp: () => <ExportTab format="clip" />, acceptsFile: isVideoPath },
+      { key: "gif", label: "GIF", desc: "将片段导出为 GIF 动图", icon: <IconGif size={20} />, Comp: () => <ExportTab format="gif" />, acceptsFile: isVideoPath },
+      { key: "webp", label: "WebP", desc: "将片段导出为 WebP 动图", icon: <IconWebp size={20} />, Comp: () => <ExportTab format="webp" />, acceptsFile: isVideoPath },
     ],
   },
   {
@@ -76,13 +86,24 @@ const AGENT_TASK_LABEL: Record<AgentTaskSnapshot['function'], string> = {
   workflow: '流程',
 };
 
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.2.1";
 const PROJECT_GITHUB_URL = "https://github.com/AngleNaris/shadowencoder";
+
+const THEME_ACCENT_OPTIONS = [
+  { value: '#6d5da5', label: '默认紫' },
+  { value: '#3578a8', label: '冷蓝' },
+  { value: '#23858c', label: '青绿' },
+  { value: '#3f7f5f', label: '松绿' },
+  { value: '#9b6a2f', label: '琥珀' },
+  { value: '#a24f63', label: '玫红' },
+] as const;
 
 type UpdateCheckInfo = {
   current_version?: string;
+  latest_version?: string;
   update_available?: boolean;
   notes?: string;
+  release_url?: string;
   error?: string;
 };
 
@@ -95,6 +116,7 @@ function BrandRayField() {
 }
 
 function UpdateDialog({ onClose }: { onClose: () => void }) {
+  useModalLayerRegistration();
   const [info, setInfo] = useState<UpdateCheckInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const check = useCallback(async () => {
@@ -121,7 +143,8 @@ function UpdateDialog({ onClose }: { onClose: () => void }) {
   const statusDetail = checking ? "正在连接更新服务，请稍候"
     : info?.error ? "请稍后重新检查"
     : info?.update_available ? "可以前往项目仓库查看最新发布" : "当前安装版本无需更新";
-  const displayedVersion = info?.current_version || APP_VERSION;
+  const displayedVersion = (info?.update_available ? info.latest_version : info?.current_version) || APP_VERSION;
+  const repositoryUrl = info?.release_url || PROJECT_GITHUB_URL;
 
   return (
     <div className="se-dialog-backdrop" onClick={onClose}>
@@ -156,27 +179,35 @@ function UpdateDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          {info?.error && !checking ? (
-            <div className="se-update-message is-error">{info.error}</div>
-          ) : null}
-          {info?.notes && !info.error && !checking ? (
-            <div className="se-update-message">
-              <span>更新说明</span>
-              <p>{info.notes}</p>
-            </div>
-          ) : null}
+          <ui.AnimatedHeight>
+            {info?.error && !checking ? (
+              <div className="se-update-message is-error">{info.error}</div>
+            ) : null}
+            {info?.notes && !info.error && !checking ? (
+              <div className="se-update-message">
+                <span>更新说明</span>
+                <p>{info.notes}</p>
+              </div>
+            ) : null}
+          </ui.AnimatedHeight>
 
-          <a
+          <button
+            type="button"
             className="se-update-repository"
-            href={PROJECT_GITHUB_URL}
-            target="_blank"
-            rel="noreferrer"
             title="打开 ShadowEncoder GitHub 仓库"
+            onClick={() => {
+              void openUrl(repositoryUrl).catch((error) => {
+                setInfo((current) => ({
+                  ...current,
+                  error: String(error?.message || error),
+                }));
+              });
+            }}
           >
             <span>项目仓库</span>
             <strong>github.com/AngleNaris/shadowencoder</strong>
             <IconExport size={14} />
-          </a>
+          </button>
         </div>
         <div className="se-dialog-foot">
           <ui.Button icon={<IconUpdate size={14} />} onClick={() => { void check(); }} disabled={checking}>
@@ -191,7 +222,139 @@ function UpdateDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function SharedFilesColumn({ disabled = false }: { disabled?: boolean }) {
+function AppSettingsDialog({
+  preference,
+  highContrast,
+  accentColor,
+  onPreferenceChange,
+  onHighContrastChange,
+  onAccentColorChange,
+  onClose,
+}: {
+  preference: ThemePreference;
+  highContrast: boolean;
+  accentColor: string;
+  onPreferenceChange: (preference: ThemePreference) => void;
+  onHighContrastChange: (enabled: boolean) => void;
+  onAccentColorChange: (accent: string) => void;
+  onClose: () => void;
+}) {
+  useModalLayerRegistration();
+  const [accentDraft, setAccentDraft] = useState(accentColor.toUpperCase());
+  useEffect(() => setAccentDraft(accentColor.toUpperCase()), [accentColor]);
+  const options: { value: ThemePreference; label: string }[] = [
+    { value: 'system', label: '跟随系统' },
+    { value: 'dark', label: '深色' },
+    { value: 'light', label: '浅色' },
+  ];
+  const commitAccent = (value: string) => {
+    const normalized = normalizeThemeAccent(value);
+    if (!normalized) return;
+    setAccentDraft(normalized.toUpperCase());
+    onAccentColorChange(normalized);
+  };
+
+  return (
+    <div className="se-dialog-backdrop" onClick={onClose}>
+      <div className="se-dialog se-settings-dialog" onClick={(event) => event.stopPropagation()}>
+        <div className="se-dialog-head">
+          <span className="se-dialog-title">应用设置</span>
+          <button className="se-dialog-close" onClick={onClose} title="关闭">
+            <IconClose size={14} />
+          </button>
+        </div>
+        <div className="se-dialog-body">
+          <section className="se-settings-section">
+            <div className="se-settings-section-head">
+              <strong>外观模式</strong>
+            </div>
+            <div className="se-settings-theme-options" role="radiogroup" aria-label="应用主题">
+              {options.map((option) => (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={preference === option.value}
+                  key={option.value}
+                  className={preference === option.value ? 'is-active' : undefined}
+                  onClick={() => onPreferenceChange(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="se-settings-section">
+            <div className="se-settings-section-head">
+              <strong>主题色</strong>
+            </div>
+            <div className="se-settings-accent-row">
+              <div className="se-settings-swatches" aria-label="预设主题色">
+                {THEME_ACCENT_OPTIONS.map((option) => (
+                  <button
+                    type="button"
+                    key={option.value}
+                    className={`se-settings-swatch${accentColor === option.value ? ' is-active' : ''}`}
+                    style={{ '--swatch-color': option.value } as React.CSSProperties}
+                    onClick={() => commitAccent(option.value)}
+                    title={option.label}
+                    aria-label={option.label}
+                    aria-pressed={accentColor === option.value}
+                  />
+                ))}
+                <label className="se-settings-color-picker" title="选择自定义颜色">
+                  <input
+                    type="color"
+                    value={accentColor}
+                    onChange={(event) => commitAccent(event.target.value)}
+                    aria-label="选择自定义主题色"
+                  />
+                  <span style={{ '--swatch-color': accentColor } as React.CSSProperties} />
+                </label>
+              </div>
+              <input
+                className="se-settings-hex-input"
+                value={accentDraft}
+                maxLength={7}
+                spellCheck={false}
+                aria-label="主题色十六进制值"
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setAccentDraft(value.toUpperCase());
+                  const normalized = normalizeThemeAccent(value);
+                  if (normalized) onAccentColorChange(normalized);
+                }}
+                onBlur={() => setAccentDraft(accentColor.toUpperCase())}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                }}
+              />
+            </div>
+          </section>
+
+          <section className="se-settings-section se-settings-display-section">
+            <div className="se-settings-section-head">
+              <strong>辅助显示</strong>
+            </div>
+            <div className="se-settings-contrast-option">
+              <ui.Checkbox checked={highContrast} onChange={onHighContrastChange}>
+                高对比度
+              </ui.Checkbox>
+            </div>
+          </section>
+        </div>
+        <div className="se-dialog-foot">
+          <ui.Button icon={<IconClose size={14} />} onClick={onClose}>关闭</ui.Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SharedFilesColumn({ disabled = false, acceptsFile }: {
+  disabled?: boolean;
+  acceptsFile?: (path: string) => boolean;
+}) {
   const fl = useFileList();
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -210,6 +373,7 @@ function SharedFilesColumn({ disabled = false }: { disabled?: boolean }) {
         onClear={fl.clear}
         onSelectAll={fl.selectAll}
         onPick={() => setPickerOpen(true)}
+        acceptsFile={acceptsFile}
         disabled={disabled}
       />
       <MediaPickerDialog
@@ -223,7 +387,19 @@ function SharedFilesColumn({ disabled = false }: { disabled?: boolean }) {
 
 function AppShell() {
   const [tab, setTab] = useState(0);
+  const renderedTab = useDeferredValue(tab);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const {
+    preference: themePreference,
+    highContrast,
+    accentColor,
+    setPreference: setThemePreference,
+    setHighContrast,
+    setAccentColor,
+  } = useAppTheme();
   const [agentTaskState, setAgentTaskState] = useState<AgentTaskSnapshot | null>(null);
   const [activeAgentTaskId, setActiveAgentTaskId] = useState<string | null>(null);
   const { wFiles, resizeFiles } = useColumnLayout();
@@ -240,6 +416,11 @@ function AppShell() {
   const lastAgentProgressRef = useRef({ taskId: '', progress: 0 });
 
   taskRef.current = task;
+
+  const switchTab = useCallback((targetTab: number) => {
+    if (taskRef.current.running) return;
+    setTab((currentTab) => currentTab === targetTab ? currentTab : targetTab);
+  }, []);
 
   const refreshAgentTaskState = useCallback(async () => {
     try {
@@ -453,18 +634,24 @@ function AppShell() {
     if (progressTimerRef.current) globalThis.clearTimeout(progressTimerRef.current);
   }, []);
 
-  const Current = TABS[tab].Comp;
+  const Current = TABS[renderedTab].Comp;
   return (
     <div className="se-app-frame">
       <div className={`se-app${task.running ? ' is-task-running' : ''}`} aria-busy={task.running}>
       {/* 左侧功能导航轨 */}
       <nav className="se-rail">
-        <div className="se-rail-brand" title={`ShadowEncoder v${APP_VERSION}`}>
+        <button
+          type="button"
+          className="se-rail-brand"
+          onClick={openSettings}
+          title="应用设置"
+          aria-label="打开应用设置"
+        >
           <span className="se-rail-brand-mark">
             <BrandRayField />
-            <img className="se-rail-brand-icon" src={appIcon} alt="ShadowEncoder" />
+            <img className="se-rail-brand-icon" src={appIcon} alt="" />
           </span>
-        </div>
+        </button>
         <div className="se-rail-nav">
           {NAV_GROUPS.map((g) => (
             <div className="se-rail-group" key={g.label}>
@@ -475,7 +662,7 @@ function AppShell() {
                   <button
                     key={t.key}
                     className={`se-rail-item${i === tab ? " active" : ""}`}
-                    onClick={() => setTab(i)}
+                    onClick={() => switchTab(i)}
                     title={`${t.label} — ${t.desc}`}
                     disabled={task.running}
                   >
@@ -503,7 +690,7 @@ function AppShell() {
             className="se-col-files"
             style={{ flex: `0 0 ${wFiles}px`, width: wFiles, minWidth: wFiles }}
           >
-            <SharedFilesColumn disabled={task.running} />
+            <SharedFilesColumn disabled={task.running} acceptsFile={TABS[renderedTab].acceptsFile} />
           </div>
           <ResizeHandle onDelta={resizeFiles} />
           <div className="se-col-tool">
@@ -527,6 +714,17 @@ function AppShell() {
         </div>
       </div>
 
+        {settingsOpen && (
+          <AppSettingsDialog
+            preference={themePreference}
+            highContrast={highContrast}
+            accentColor={accentColor}
+            onPreferenceChange={setThemePreference}
+            onHighContrastChange={setHighContrast}
+            onAccentColorChange={setAccentColor}
+            onClose={closeSettings}
+          />
+        )}
         {updateOpen && <UpdateDialog onClose={() => setUpdateOpen(false)} />}
       </div>
 
@@ -536,8 +734,7 @@ function AppShell() {
 
 export function App() {
   return (
-    <ThemeProvider theme={muiTheme}>
-      <CssBaseline />
+    <AppThemeProvider>
       <FileListProvider>
         <PresetStoreProvider>
           <ColumnLayoutProvider>
@@ -547,6 +744,6 @@ export function App() {
           </ColumnLayoutProvider>
         </PresetStoreProvider>
       </FileListProvider>
-    </ThemeProvider>
+    </AppThemeProvider>
   );
 }

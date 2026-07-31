@@ -1,5 +1,5 @@
 export const PRESET_TYPES = [
-  'encode', 'mix', 'check', 'alpha', 'screenshot', 'segment', 'gif', 'webp', 'backup', 'workflow',
+  'encode', 'mix', 'check', 'alpha', 'screenshot', 'segment', 'gif', 'webp', 'sequence', 'backup', 'workflow',
 ] as const;
 
 export type PresetType = typeof PRESET_TYPES[number];
@@ -64,6 +64,7 @@ export function emptyPresetStore(): PresetStore {
     segment: [],
     gif: [],
     webp: [],
+    sequence: [],
     backup: [],
     workflow: [],
   };

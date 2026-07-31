@@ -13,6 +13,7 @@ import React, {
 } from 'react';
 import * as ui from './ui';
 import { IconClose, IconCheckShield, IconPlus, IconExport, IconImport, IconTrash, IconCopy, IconSettings } from './icons';
+import { useModalLayerRegistration } from '../lib/modalLayer';
 import {
   DEFAULT_OUTPUT_FORM,
   OUTPUT_PRESET_FIELDS,
@@ -62,6 +63,7 @@ export const TYPE_LABEL: Record<PresetType, string> = {
   segment: '截取',
   gif: 'GIF',
   webp: 'WebP',
+  sequence: '序列帧',
   backup: 'DIT 备份',
   workflow: 'DIT 流程',
 };
@@ -73,6 +75,7 @@ const OUTPUT_PRESENTATION: Partial<Record<PresetType, { extension: string; defau
   segment: { extension: 'mp4', defaultSuffix: '_clip' },
   gif: { extension: 'gif', defaultSuffix: '' },
   webp: { extension: 'webp', defaultSuffix: '' },
+  sequence: { extension: 'jpg', defaultSuffix: '_frames' },
 };
 
 type FieldDef = {
@@ -102,6 +105,14 @@ export const GIF_COMPRESSION_OPTIONS = [
   { label: '智能压缩', value: 'optimized', tags: ['推荐'] },
   { label: '体积优先', value: 'compact' },
   { label: '极限压缩', value: 'aggressive' },
+];
+
+export const IMAGE_SEQUENCE_FORMAT_OPTIONS = [
+  { label: 'JPEG', value: 'jpg' },
+  { label: 'PNG', value: 'png', tags: ['无损'] },
+  { label: 'WebP', value: 'webp' },
+  { label: 'TIFF', value: 'tiff', tags: ['无损'] },
+  { label: 'BMP', value: 'bmp', tags: ['无压缩'] },
 ];
 
 export const DEFAULT_BACKUP_PRESET_PARAMS = {
@@ -150,6 +161,9 @@ export const PRESET_SCHEMAS: Record<Exclude<PresetType, 'encode'>, FieldDef[]> =
     { key: 'customRatio', label: '自定义比例', kind: 'text', default: '3:2' },
     { key: 'w', label: '宽度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.width },
     { key: 'h', label: '高度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.height },
+    { key: 'imageFormat', label: '图片格式', kind: 'select', options: IMAGE_SEQUENCE_FORMAT_OPTIONS, default: 'png' },
+    { key: 'quality', label: '质量', kind: 'int', min: 1, max: 100, default: 90 },
+    { key: 'pngCompression', label: 'PNG 压缩级别', kind: 'int', min: 0, max: 9, default: 6 },
     ...OUTPUT_PRESET_FIELDS,
   ],
   segment: [
@@ -180,6 +194,20 @@ export const PRESET_SCHEMAS: Record<Exclude<PresetType, 'encode'>, FieldDef[]> =
     { key: 'h', label: '高度', kind: 'int', min: 1, max: 4096, default: DEFAULT_EXPORT_DIMENSIONS.height },
     { key: 'fps', label: '帧率', kind: 'number', min: 1, max: 60, step: 0.1, default: 15 },
     { key: 'quality', label: '质量', kind: 'int', min: 1, max: 100, default: 75 },
+    { key: 'fixedDur', label: '固定时长', kind: 'checkbox', default: false },
+    { key: 'fixedVal', label: '时长', kind: 'number', min: 0.1, max: 9999, step: 0.1, default: 2 },
+    ...OUTPUT_PRESET_FIELDS,
+  ],
+  sequence: [
+    { key: 'aspect', label: '比例', kind: 'select', options: CROP_ASPECT_OPTIONS, default: 'free' },
+    { key: 'customRatio', label: '自定义比例', kind: 'text', default: '3:2' },
+    { key: 'w', label: '宽度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.width },
+    { key: 'h', label: '高度', kind: 'int', min: 1, max: 8192, default: DEFAULT_EXPORT_DIMENSIONS.height },
+    { key: 'fps', label: '帧率', kind: 'number', min: 0.1, max: 120, step: 0.1, default: 25 },
+    { key: 'imageFormat', label: '图片格式', kind: 'select', options: IMAGE_SEQUENCE_FORMAT_OPTIONS, default: 'jpg' },
+    { key: 'quality', label: '质量', kind: 'int', min: 1, max: 100, default: 90 },
+    { key: 'pngCompression', label: 'PNG 压缩级别', kind: 'int', min: 0, max: 9, default: 6 },
+    { key: 'fullDuration', label: '完整素材长度', kind: 'checkbox', default: false },
     { key: 'fixedDur', label: '固定时长', kind: 'checkbox', default: false },
     { key: 'fixedVal', label: '时长', kind: 'number', min: 0.1, max: 9999, step: 0.1, default: 2 },
     ...OUTPUT_PRESET_FIELDS,
@@ -524,6 +552,7 @@ export function PresetManageDialog({
   closing?: boolean;
   children: React.ReactNode;
 }) {
+  useModalLayerRegistration(!closing);
   const fileRef = useRef<HTMLInputElement>(null);
   const [importErr, setImportErr] = useState<string | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -666,6 +695,11 @@ const GENERIC_PRESET_GROUPS: Partial<Record<PresetType, GenericPresetGroupSpec[]
     { id: 'aspect', title: '选取比例', rowIds: ['field-aspect', 'custom-ratio'] },
     { id: 'output', title: '输出参数 (WebP)', rowIds: ['resolution', 'field-fps', 'field-quality'] },
   ],
+  sequence: [
+    { id: 'range', title: '时间范围', rowIds: ['full-duration', 'fixed-duration'] },
+    { id: 'aspect', title: '选取比例', rowIds: ['field-aspect', 'custom-ratio'] },
+    { id: 'output', title: '输出参数 (序列帧)', rowIds: ['resolution', 'field-fps', 'field-imageFormat', 'field-quality'] },
+  ],
 };
 
 // 通用预设构建器（schema 驱动），用于无需专属编辑器的非编码功能。
@@ -723,7 +757,7 @@ function GenericPresetBuilder({ type, ctx, initial }: {
 
   if (!ctx.isMounted) return null;
   const customRenderedKeys = new Set([
-    'lnOn', 'tpOn', 'fpsOriginal', 'recursive', 'blackDetect', 'fixedDur', 'fixedVal',
+    'lnOn', 'tpOn', 'fpsOriginal', 'recursive', 'blackDetect', 'fullDuration', 'fixedDur', 'fixedVal',
     ...(type === 'alpha' ? ['fps'] : []),
   ]);
   const visibleSchema = schema
@@ -769,12 +803,37 @@ function GenericPresetBuilder({ type, ctx, initial }: {
       ),
     });
   }
-  if (type === 'segment' || type === 'gif' || type === 'webp') {
+  if (type === 'sequence') {
+    fieldRows.push({
+      id: 'full-duration',
+      content: (
+        <>
+          <ui.FieldLabel>范围</ui.FieldLabel>
+          <ui.Checkbox
+            checked={!!form.fullDuration}
+            onChange={(value) => {
+              set('fullDuration', value);
+              if (value) set('fixedDur', false);
+            }}
+          >
+            完整素材长度
+          </ui.Checkbox>
+        </>
+      ),
+    });
+  }
+  if (type === 'segment' || type === 'gif' || type === 'webp' || type === 'sequence') {
     fieldRows.push({
       id: 'fixed-duration',
       content: (
         <>
-          <ui.Checkbox checked={!!form.fixedDur} onChange={(value) => set('fixedDur', value)}>固定时长</ui.Checkbox>
+          <ui.Checkbox
+            checked={!!form.fixedDur}
+            disabled={type === 'sequence' && form.fullDuration === true}
+            onChange={(value) => set('fixedDur', value)}
+          >
+            固定时长
+          </ui.Checkbox>
           <ui.NumberField
             value={form.fixedVal}
             min={0.1}
@@ -953,7 +1012,7 @@ function GenericPresetBuilder({ type, ctx, initial }: {
         <OutputLocationGroup
           value={form}
           presetName={name}
-          extension={OUTPUT_PRESENTATION[type]?.extension}
+          extension={type === 'sequence' ? form.imageFormat : OUTPUT_PRESENTATION[type]?.extension}
           defaultSuffix={OUTPUT_PRESENTATION[type]?.defaultSuffix}
           onChange={(key, value) => set(key, value)}
         />
@@ -990,7 +1049,14 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
   if (type === 'encode') {
     const codecLabel = (VIDEO_CODEC_LABEL[p.videoCodec] as string) || p.videoCodec || '—';
     const prof = p.videoProfile ? ` / ${p.videoProfile}` : '';
-    const res = (p.scaleW && p.scaleH) ? `${p.scaleW}×${p.scaleH}` : '原始分辨率';
+    const scaleMode = p.scaleMode || (p.keepRes ? 'original' : ((p.scaleW && p.scaleH) ? 'dimensions' : 'original'));
+    const res = scaleMode === 'longEdge'
+      ? `长边 ${p.scaleEdge || '—'}px`
+      : scaleMode === 'shortEdge'
+        ? `短边 ${p.scaleEdge || '—'}px`
+        : scaleMode === 'dimensions' && p.scaleW && p.scaleH
+          ? `${p.scaleW}×${p.scaleH}`
+          : '原始分辨率';
     // 码控模式（兼容旧预设：无 rateMode 默认 CRF）
     const mode = p.rateMode || 'crf';
     let q: string;
@@ -1001,6 +1067,9 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
     } else if (mode === 'bitrate') {
       q = '码率优先';
       vbr = p.videoBitrate > 0 ? `${p.videoBitrate / 1000} Mbps` : '—';
+    } else if (mode === 'capped') {
+      q = p.crf != null ? `CRF ${p.crf}` : '—';
+      vbr = `上限 ${p.maxrate > 0 ? `${p.maxrate / 1000} Mbps` : '—'} · 缓冲 ${p.bufsize > 0 ? `${p.bufsize / 1000} Mbps` : '—'}`;
     } else {
       q = p.crf != null ? `CRF ${p.crf}` : '—';
       vbr = p.videoBitrate > 0 ? `${p.videoBitrate / 1000} Mbps` : (p.crf != null ? 'CRF（自动码率）' : '—');
@@ -1008,11 +1077,14 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
     const aLabel = (AUDIO_CODEC_LABEL[p.audioCodec] as string) || p.audioCodec || '—';
     let abr = '—';
     if (p.videoCodec === 'gif') abr = '无音频轨';
-    else if (p.audioOnly || p.audioCodec === 'copy') abr = '复制音频流';
+    else if (p.audioOnly) abr = '仅输出音频';
+    else if (p.noAudio) abr = '不输出音轨';
+    else if (p.audioCodec === 'copy') abr = '复制音频流';
     else if (p.audioBitrate > 0) abr = `${p.audioBitrate} kbps`;
     rows = [
       { k: '封装', v: (p.container || '—').toUpperCase() },
       { k: '视频', v: `${codecLabel}${prof}` },
+      { k: 'Level', v: p.videoLevel || '自动' },
       { k: mode === 'filesize' ? '目标体积' : (mode === 'bitrate' ? '质量' : '质量'), v: q },
       { k: '视频码率', v: vbr },
       { k: '分辨率', v: res },
@@ -1021,7 +1093,8 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
       { k: '音频码率', v: abr },
       { k: '锐化', v: String(p.unsharp ?? '—') },
       { k: '降噪', v: String(p.denoise ?? '—') },
-      { k: '风格', v: STYLE_LABEL[p.style] || String(p.style ?? '—') },
+      { k: '去块', v: String(p.deblock ?? '—') },
+      { k: '调优', v: p.tune && p.tune !== 'none' ? p.tune : '无' },
       { k: '2-pass 编码', v: p.twoPass ? '开启' : '关闭' },
       { k: '进度预览', v: p.previewDuringEncode === false ? '关闭' : '开启' },
       { k: '存储位置', v: describeOutputSettings(p) },
@@ -1310,4 +1383,3 @@ const AUDIO_CODEC_LABEL: Record<string, string> = {
   'pcm_s16le': 'PCM 16', 'pcm_s24le': 'PCM 24', alac: 'ALAC', ac3: 'AC-3', eac3: 'E-AC-3',
   wmav2: 'WMA', copy: '复制',
 };
-const STYLE_LABEL: Record<number, string> = { 0: '无风格', 1: '实拍视频', 2: '动画类' };

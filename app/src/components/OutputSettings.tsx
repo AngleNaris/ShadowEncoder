@@ -98,6 +98,7 @@ export const OUTPUT_MODE_OPTIONS = [
   { label: '原文件旁边并重命名', value: 'rename' },
   { label: '原文件目录的子目录', value: 'subdir' },
   { label: '指定目录', value: 'fixed' },
+  { label: '指定目录并重命名', value: 'fixedRename' },
 ];
 
 export const OUTPUT_PRESET_FIELDS = [
@@ -141,6 +142,9 @@ export function describeOutputSettings(value: Partial<OutputFormState>): string 
     return `原文件旁 · ${output.outputNameTemplate || '{name}{suffix}'}`;
   }
   if (output.outputMode === 'subdir') return `原目录 / ${output.outputSubdirectory || 'ShadowEncoder'}`;
+  if (output.outputMode === 'fixedRename') {
+    return `${output.outputDirectory || '未选择目录'} · ${output.outputNameTemplate || '{name}{suffix}'}`;
+  }
   if (output.outputMode === 'fixed') return output.outputDirectory || '未选择目录';
   return '原文件旁边';
 }
@@ -372,7 +376,7 @@ export function OutputLocationFields({
       ),
     });
   }
-  if (output.outputMode === 'rename') {
+  if (output.outputMode === 'rename' || output.outputMode === 'fixedRename') {
     rows.push({
       id: 'filename-template',
       content: (
@@ -408,7 +412,7 @@ export function OutputLocationFields({
       ),
     });
   }
-  if (output.outputMode === 'fixed') {
+  if (output.outputMode === 'fixed' || output.outputMode === 'fixedRename') {
     rows.push({
       id: 'output-directory',
       content: (

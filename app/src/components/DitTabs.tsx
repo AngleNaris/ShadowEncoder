@@ -57,6 +57,7 @@ import {
 } from '../lib/agentTaskBridge';
 import {
   DEFAULT_ENCODE_FORM,
+  normalizeEncodeParams,
   ResultViewContent,
   ResultViewProgress,
   ResultViewTitle,
@@ -753,7 +754,7 @@ function findPreset(
 }
 
 async function transcodePreset(paths: string[], preset: Preset, uniqueName = false): Promise<string[]> {
-  const form: any = { ...DEFAULT_ENCODE_FORM, ...preset.params };
+  const form: any = { ...DEFAULT_ENCODE_FORM, ...normalizeEncodeParams(preset.params) };
   return transcode({
     paths,
     videoCodec: form.videoCodec,
@@ -761,13 +762,18 @@ async function transcodePreset(paths: string[], preset: Preset, uniqueName = fal
     crf: form.crf,
     speedPreset: form.preset,
     tune: form.tune,
-    style: form.style,
+    style: 0,
+    videoLevel: form.videoLevel,
     pixelFormat: form.pixelFormat,
     container: form.container,
+    scaleMode: form.scaleMode,
+    scaleEdge: form.scaleEdge,
     scaleW: form.scaleW,
     scaleH: form.scaleH,
     fps: form.fps,
     videoBitrate: form.videoBitrate,
+    maxrate: form.maxrate,
+    bufsize: form.bufsize,
     audioCodec: form.audioCodec,
     audioProfile: form.audioProfile,
     audioBitrate: form.audioBitrate,
@@ -775,8 +781,10 @@ async function transcodePreset(paths: string[], preset: Preset, uniqueName = fal
     audioChannels: form.audioChannels,
     unsharp: form.unsharp,
     denoise: form.denoise,
+    deblock: form.deblock,
     loudnorm: form.loudnorm,
     audioOnly: form.audioOnly,
+    noAudio: form.noAudio,
     keepRes: form.keepRes,
     rateMode: form.rateMode || 'crf',
     targetFileSizeMb: form.targetFileSizeMb || 0,

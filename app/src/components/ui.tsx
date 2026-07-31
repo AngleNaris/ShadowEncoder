@@ -4,12 +4,14 @@ import React, { ReactNode, useState, useEffect, useLayoutEffect, useRef } from '
 import FormControl from '@mui/material/FormControl';
 import Select from '@mui/material/Select';
 import MenuItem from '@mui/material/MenuItem';
+import ListSubheader from '@mui/material/ListSubheader';
 import {
   IconCaretDown, IconCaretUp, IconClose, IconFile, IconFolder,
   IconPlus, IconSelectAll, IconTerminal, IconTrash, IconVideo,
 } from './icons';
 import type { TaskLogEvent, TaskLogTone } from '../lib/ffmpeg';
 import type { FileListItem } from '../lib/fileListContext';
+import { isMediaPath } from '../lib/mediaExtensions';
 
 /* ── 面板（左固定 / 右自适应） ─────────────────────────────── */
 export function LeftPanel({ alpha, children }: { alpha?: boolean; children: ReactNode }) {
@@ -184,6 +186,24 @@ export function AnimatedCollapse({
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     };
+  }, [mounted, open]);
+
+  useLayoutEffect(() => {
+    const outer = outerRef.current;
+    const inner = innerRef.current;
+    if (!mounted || !open || !outer || !inner || typeof ResizeObserver === 'undefined') return undefined;
+
+    let measuredHeight = inner.scrollHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = inner.scrollHeight;
+      if (Math.abs(nextHeight - measuredHeight) < 0.5) return;
+      measuredHeight = nextHeight;
+      if (outer.style.height && outer.style.height !== 'auto') {
+        outer.style.height = `${nextHeight}px`;
+      }
+    });
+    observer.observe(inner);
+    return () => observer.disconnect();
   }, [mounted, open]);
 
   if (!mounted) return null;
@@ -489,7 +509,8 @@ export function AnimatedList<T>({ items, getKey, renderItem, className, itemClas
     exitTimers.current.forEach((timer) => window.clearTimeout(timer));
   }, []);
 
-  if (entries.length === 0 && tail == null) return empty ?? null;
+  const showEmpty = items.length === 0 && empty != null;
+  if (entries.length === 0 && tail == null && !showEmpty) return null;
   return (
     <div ref={listRef} onClick={onClick} className={[
       'se-animated-list',
@@ -548,6 +569,11 @@ export function AnimatedList<T>({ items, getKey, renderItem, className, itemClas
           </div>
         );
       })}
+      {showEmpty ? (
+        <div className={`se-animated-list-empty${entries.length > 0 ? ' is-entering' : ''}`}>
+          <div className="se-animated-list-empty-inner">{empty}</div>
+        </div>
+      ) : null}
       {tail}
     </div>
   );
@@ -703,6 +729,7 @@ export type ComboBoxOption = {
   label: string;
   value: any;
   tags?: readonly (string | number)[];
+  group?: string;
 };
 
 function ComboBoxOptionContent({
@@ -766,11 +793,18 @@ export function ComboBox({
         }}
       >
         {!inRange && <MenuItem value={valStr} sx={{ display: 'none' }} />}
-        {options.map((o) => (
-          <MenuItem key={String(o.value)} value={String(o.value)}>
-            <ComboBoxOptionContent option={o} tagAreaWidth={menuTagAreaWidth} />
-          </MenuItem>
-        ))}
+        {options.flatMap((o, index) => {
+          const items: React.ReactNode[] = [];
+          if (o.group && (index === 0 || options[index - 1]?.group !== o.group)) {
+            items.push(<ListSubheader key={`group-${o.group}`} className="se-combo-group" disableSticky>{o.group}</ListSubheader>);
+          }
+          items.push(
+            <MenuItem key={String(o.value)} value={String(o.value)}>
+              <ComboBoxOptionContent option={o} tagAreaWidth={menuTagAreaWidth} />
+            </MenuItem>,
+          );
+          return items;
+        })}
       </Select>
     </FormControl>
   );
@@ -1178,6 +1212,7 @@ export function FileList({
   onActivate,
   onOpen,
   onRemove,
+  acceptsFile,
   disabled = false,
 }: {
   items?: FileListItem[];
@@ -1188,6 +1223,7 @@ export function FileList({
   onActivate?: (p: string) => void;
   onOpen?: (p: string) => void;
   onRemove?: (p: string) => void;
+  acceptsFile?: (path: string) => boolean;
   disabled?: boolean;
 }) {
   const [drag, setDrag] = useState(false);
@@ -1222,18 +1258,21 @@ export function FileList({
       <ul role="tree">
         {items.map((item) => {
           const active = activePath === item.path;
+          const nonMedia = !item.isDirectory && !isMediaPath(item.path);
+          const unsupported = !item.isDirectory && !!acceptsFile && !acceptsFile(item.path);
           return (
             <li
               key={item.path}
               role="treeitem"
               aria-level={item.depth + 1}
               aria-expanded={item.isDirectory ? item.expanded : undefined}
+              aria-disabled={unsupported || undefined}
               data-tree-depth={item.depth}
-              className={`${item.isDirectory ? 'dir' : 'file'}${active ? ' active' : ''}${item.checked ? ' checked' : ''}${item.indeterminate ? ' partial' : ''}${item.error ? ' has-error' : ''}`}
-              title={item.error ? `${item.path}\n${item.error}` : item.path}
+              className={`${item.isDirectory ? 'dir' : 'file'}${active ? ' active' : ''}${item.checked ? ' checked' : ''}${item.indeterminate ? ' partial' : ''}${item.error ? ' has-error' : ''}${nonMedia ? ' is-non-media' : ''}${unsupported ? ' is-unsupported' : ''}`}
+              title={unsupported ? `当前功能不支持此素材\n${item.path}` : item.error ? `${item.path}\n${item.error}` : item.path}
               style={{ '--tree-depth': item.depth } as React.CSSProperties}
               onClick={(event) => {
-                if (disabled) return;
+                if (disabled || unsupported) return;
                 if (item.isDirectory && item.expanded) {
                   const row = event.currentTarget;
                   if (row.dataset.treeTransition === 'true') return;
@@ -1246,7 +1285,7 @@ export function FileList({
                 else onActivate?.(item.path);
               }}
               onDoubleClick={(event) => {
-                if (!disabled && !item.isDirectory && !(event.target as HTMLElement).closest('button, label')) onOpen?.(item.path);
+                if (!disabled && !unsupported && !item.isDirectory && !(event.target as HTMLElement).closest('button, label')) onOpen?.(item.path);
               }}
               onMouseEnter={(event) => updateFileNameMarquee(event.currentTarget, true)}
               onMouseLeave={(event) => updateFileNameMarquee(event.currentTarget, false)}
@@ -1261,7 +1300,7 @@ export function FileList({
                   className="se-check-input"
                   checked={item.checked}
                   aria-checked={item.indeterminate ? 'mixed' : item.checked}
-                  disabled={disabled}
+                  disabled={disabled || unsupported}
                   onChange={() => onToggleSelect(item.path)}
                 />
                 <span className="se-check-box" aria-hidden />
@@ -1310,6 +1349,7 @@ export function SharedFilePanel({
   onClear,
   onSelectAll,
   onPick,
+  acceptsFile,
   disabled,
 }: {
   items?: FileListItem[];
@@ -1324,6 +1364,7 @@ export function SharedFilePanel({
   onClear: () => void;
   onSelectAll: () => void;
   onPick: () => void;
+  acceptsFile?: (path: string) => boolean;
   disabled?: boolean;
 }) {
   return (
@@ -1341,6 +1382,7 @@ export function SharedFilePanel({
         onActivate={onActivate}
         onOpen={onOpen}
         onRemove={onRemove}
+        acceptsFile={acceptsFile}
         disabled={disabled}
       />
       <div className="se-btn-grid">

@@ -66,7 +66,7 @@ shadowencoder-cli preset item-remove <preset-id> <field> <item-id> --revision <n
 shadowencoder-cli preset delete <preset-id> --revision <n>
 ```
 
-`preset set` accepts only a string, number, or boolean. It rejects arrays, objects, and unknown fields. Use `item-add` or `item-remove` for one allowed list item. `preset show` exposes stable item IDs for list fields.
+`preset set` accepts only a string, number, or boolean. It rejects arrays, objects, and unknown fields. For booleans, pass the unquoted lowercase JSON literals `true` or `false`; `1`, `0`, and quoted `"true"`/`"false"` are not booleans. Read `fieldDefinitions` from `schema show` for each field's exact type, range, unit, and allowed values. Use `item-add` or `item-remove` for one allowed list item. `preset show` exposes stable item IDs for list fields.
 
 ## Source Commands
 

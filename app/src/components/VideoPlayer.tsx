@@ -1,6 +1,6 @@
 // ShadowEncoder 统一播放器 —— 复刻原 CvPlayer 交互（性能：按需绘制，不整文件进内存）
 import React, {
-  forwardRef, useId, useImperativeHandle, useRef, useState, useEffect, useCallback,
+  forwardRef, useImperativeHandle, useRef, useState, useEffect, useLayoutEffect, useCallback,
 } from 'react';
 import {
   isTauriRuntime,
@@ -10,16 +10,26 @@ import {
   playerLoad,
   playerPause,
   playerPlay,
+  previewFrame,
   playerSeek,
+  playerStep,
   playerFrame,
   playerSetSurface,
   playerStatus,
   subscribePlayerSelection,
   type PlayerFrame,
+  type PlayerFrameDirection,
   type PlayerSelectionEvent,
   type PlayerStatus,
 } from '../lib/ffmpeg';
 import { clearOutputCropSelection } from '../lib/outputDimensions';
+import {
+  isModalLayerOpen,
+  subscribeModalLayerPreparation,
+  useModalLayerOpen,
+} from '../lib/modalLayer';
+import { useAppTheme } from '../lib/AppThemeProvider';
+import { deriveAccentPalette, deriveThemeChromePalette } from '../lib/themeAccent';
 
 export interface CropRectResult {
   x: number;
@@ -90,6 +100,96 @@ function decodeBase64(value: string): Uint8Array {
 const HANDLE_HIT = 12;
 const MIN_CROP_SIZE = 4;
 const MPV_FIRST_FRAME_TIMEOUT_MS = 20000;
+const MPV_DESTROY_GRACE_MS = 750;
+const SHARED_NATIVE_PLAYER_ID = 'shadowencoder-main-preview';
+const WEBVIEW_FRAME_STEP_SECONDS = 1 / 30;
+const activeNativePlayerLeases = new Map<string, symbol>();
+const pendingNativePlayerHideTimers = new Map<string, number>();
+const pendingNativePlayerDestroyTimers = new Map<string, number>();
+const nativePlayerInitPromises = new Map<string, Promise<PlayerStatus>>();
+const nativePlayerSurfaceChains = new Map<string, Promise<void>>();
+
+type NativeSurfaceConfig = Parameters<typeof playerSetSurface>[1];
+
+function enqueueNativePlayerOperation<T>(playerId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = nativePlayerSurfaceChains.get(playerId) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(operation);
+  const settled = result.then(() => undefined, () => undefined);
+  nativePlayerSurfaceChains.set(playerId, settled);
+  void settled.then(() => {
+    if (nativePlayerSurfaceChains.get(playerId) === settled) {
+      nativePlayerSurfaceChains.delete(playerId);
+    }
+  });
+  return result;
+}
+
+function ensureNativePlayerInitialized(playerId: string): Promise<PlayerStatus> {
+  const existing = nativePlayerInitPromises.get(playerId);
+  if (existing) return existing;
+  const initialization = playerInit(playerId);
+  nativePlayerInitPromises.set(playerId, initialization);
+  void initialization.catch(() => {
+    if (nativePlayerInitPromises.get(playerId) === initialization) {
+      nativePlayerInitPromises.delete(playerId);
+    }
+  });
+  return initialization;
+}
+
+function scheduleNativePlayerHide(playerId: string) {
+  if (activeNativePlayerLeases.has(playerId)) return;
+  const pendingTimer = pendingNativePlayerHideTimers.get(playerId);
+  if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
+  const timer = window.setTimeout(() => {
+    pendingNativePlayerHideTimers.delete(playerId);
+    if (activeNativePlayerLeases.has(playerId)) return;
+    void enqueueNativePlayerOperation(playerId, () => {
+      if (activeNativePlayerLeases.has(playerId)) return Promise.resolve(false);
+      return playerSetSurface(playerId, { x: 0, y: 0, width: 1, height: 1, visible: false });
+    }).catch(() => undefined);
+  }, 0);
+  pendingNativePlayerHideTimers.set(playerId, timer);
+}
+
+function scheduleNativePlayerDestroy(playerId: string) {
+  if (activeNativePlayerLeases.has(playerId)) return;
+  const pendingTimer = pendingNativePlayerDestroyTimers.get(playerId);
+  if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
+  const timer = window.setTimeout(() => {
+    pendingNativePlayerDestroyTimers.delete(playerId);
+    if (activeNativePlayerLeases.has(playerId)) return;
+    void enqueueNativePlayerOperation(playerId, async () => {
+      if (activeNativePlayerLeases.has(playerId)) return;
+      nativePlayerInitPromises.delete(playerId);
+      await playerDestroy(playerId);
+    }).catch(() => undefined);
+  }, MPV_DESTROY_GRACE_MS);
+  pendingNativePlayerDestroyTimers.set(playerId, timer);
+}
+
+function acquireNativePlayerLease(playerId: string) {
+  const lease = Symbol(playerId);
+  activeNativePlayerLeases.set(playerId, lease);
+  const pendingHideTimer = pendingNativePlayerHideTimers.get(playerId);
+  if (pendingHideTimer !== undefined) {
+    window.clearTimeout(pendingHideTimer);
+    pendingNativePlayerHideTimers.delete(playerId);
+  }
+  const pendingDestroyTimer = pendingNativePlayerDestroyTimers.get(playerId);
+  if (pendingDestroyTimer !== undefined) {
+    window.clearTimeout(pendingDestroyTimer);
+    pendingNativePlayerDestroyTimers.delete(playerId);
+  }
+  return lease;
+}
+
+function releaseNativePlayerLease(playerId: string, lease: symbol) {
+  if (activeNativePlayerLeases.get(playerId) !== lease) return;
+  activeNativePlayerLeases.delete(playerId);
+  scheduleNativePlayerHide(playerId);
+  scheduleNativePlayerDestroy(playerId);
+}
 
 function requiresNativeGpuPreview() {
   return isTauriRuntime()
@@ -166,7 +266,12 @@ function cropFromResize(
 }
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
-  const mpvPlayerId = useId();
+  const [mpvPlayerId] = useState(() => SHARED_NATIVE_PLAYER_ID);
+  const modalLayerOpen = useModalLayerOpen();
+  const { accentColor, colorScheme } = useAppTheme();
+  const nativeSelectionAccent = deriveAccentPalette(accentColor, colorScheme).bright;
+  const themeChrome = deriveThemeChromePalette(accentColor, colorScheme);
+  const checkerThemeKey = `${themeChrome.checkerDark}/${themeChrome.checkerLight}`;
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mpvFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -175,13 +280,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
   const backendRef = useRef<PlayerBackend>('webview');
   const mpvActiveRef = useRef(false);
   const mpvInitPromiseRef = useRef<Promise<PlayerStatus> | null>(null);
-  const mpvDestroyTimerRef = useRef<number | null>(null);
   const mpvFirstFrameTimerRef = useRef<number | null>(null);
   const mpvFirstFrameSeenRef = useRef(false);
   const componentMountedRef = useRef(false);
   const mpvLoadTokenRef = useRef(0);
   const mpvLoadChainRef = useRef<Promise<void>>(Promise.resolve());
-  const surfaceChainRef = useRef<Promise<void>>(Promise.resolve());
+  const surfaceGenerationRef = useRef(0);
+  const modalFrameTokenRef = useRef(0);
+  const modalWasOpenRef = useRef(false);
+  const [nativeSurfaceRevealReady, setNativeSurfaceRevealReady] = useState(true);
+  const [modalPreviewHidden, setModalPreviewHidden] = useState(false);
+  const [modalSnapshotStatus, setModalSnapshotStatus] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const mpvStatusRef = useRef<PlayerStatus | null>(null);
   const mediaSizeRef = useRef({ width: 0, height: 0 });
   const timeRef = useRef(0);
@@ -189,6 +298,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
   const rafRef = useRef(0);
   const checkerTileRef = useRef<HTMLCanvasElement | null>(null);
   const checkerScaleRef = useRef(0);
+  const checkerThemeRef = useRef('');
   const loopSeekingRef = useRef(false);
   const lastUiUpdateRef = useRef(0);
   const pendingFollowTimeRef = useRef(0);
@@ -212,7 +322,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
   const [cropCursor, setCropCursor] = useState<React.CSSProperties['cursor']>('default');
   const [nativeCropAspect, setNativeCropAspect] = useState<number | null>(null);
   const [mpvActive, setMpvActive] = useState(false);
-  const [mpvPending, setMpvPending] = useState(false);
+  const [mpvPending, setMpvPending] = useState(() => (
+    isTauriRuntime() && Boolean(props.filePath?.trim())
+  ));
   const [mpvAvailable, setMpvAvailable] = useState(false);
   const [mpvRenderer, setMpvRenderer] = useState<PlayerStatus['renderer']>('none');
   const [mediaLayoutRevision, setMediaLayoutRevision] = useState(0);
@@ -246,13 +358,24 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     setCrop(next);
   }, []);
 
-  const queueSurfaceUpdate = useCallback((surface: Parameters<typeof playerSetSurface>[1]) => {
-    const operation = surfaceChainRef.current
-      .catch(() => undefined)
-      .then(() => playerSetSurface(mpvPlayerId, surface));
-    surfaceChainRef.current = operation.then(() => undefined, () => undefined);
-    return operation;
-  }, [mpvPlayerId]);
+  const queueSurfaceUpdate = useCallback((
+    surface: NativeSurfaceConfig,
+    generation = surfaceGenerationRef.current,
+  ) => enqueueNativePlayerOperation(mpvPlayerId, () => {
+    // Native surfaces live outside the WebView stacking context. A stale
+    // layout request must never make one visible over an active dialog.
+    if (surface.visible && (generation !== surfaceGenerationRef.current || isModalLayerOpen())) {
+      return Promise.resolve(false);
+    }
+    return playerSetSurface(mpvPlayerId, surface);
+  }), [mpvPlayerId]);
+
+  useLayoutEffect(() => subscribeModalLayerPreparation(() => {
+    const generation = ++surfaceGenerationRef.current;
+    return queueSurfaceUpdate({ x: 0, y: 0, width: 1, height: 1, visible: false }, generation)
+      .then(() => undefined)
+      .catch((surfaceError) => console.error('[ShadowEncoder] hide native preview before modal failed', surfaceError));
+  }), [queueSurfaceUpdate]);
 
   const queuePlayerLoad = useCallback((path: string, token: number) => {
     let result: PlayerStatus | null = null;
@@ -328,20 +451,21 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     if (!ctx) return;
 
     const tileUnit = Math.max(1, Math.round(16 * pixelRatio));
-    if (!checkerTileRef.current || checkerScaleRef.current !== tileUnit) {
+    if (!checkerTileRef.current || checkerScaleRef.current !== tileUnit || checkerThemeRef.current !== checkerThemeKey) {
       const tile = document.createElement('canvas');
       tile.width = tileUnit * 2;
       tile.height = tileUnit * 2;
       const tileCtx = tile.getContext('2d');
       if (tileCtx) {
-        tileCtx.fillStyle = '#1a1820';
+        tileCtx.fillStyle = themeChrome.checkerDark;
         tileCtx.fillRect(0, 0, tile.width, tile.height);
-        tileCtx.fillStyle = '#2a2730';
+        tileCtx.fillStyle = themeChrome.checkerLight;
         tileCtx.fillRect(0, 0, tileUnit, tileUnit);
         tileCtx.fillRect(tileUnit, tileUnit, tileUnit, tileUnit);
       }
       checkerTileRef.current = tile;
       checkerScaleRef.current = tileUnit;
+      checkerThemeRef.current = checkerThemeKey;
     }
 
     const x = Math.round(bounds.x * pixelRatio);
@@ -361,7 +485,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     } catch {
       // 浏览器在切换资源或解码尚未开始时可能拒绝当前帧；下一帧会重新绘制。
     }
-  }, [alpha, getVideoBounds]);
+  }, [alpha, checkerThemeKey, getVideoBounds, themeChrome.checkerDark, themeChrome.checkerLight]);
 
   const paintMpvFrame = useCallback((frame: PlayerFrame): boolean => {
     const canvas = canvasRef.current;
@@ -419,20 +543,21 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     ctx.fillRect(0, 0, width, height);
     if (alpha) {
       const tileUnit = Math.max(1, Math.round(16 * pixelRatio));
-      if (!checkerTileRef.current || checkerScaleRef.current !== tileUnit) {
+      if (!checkerTileRef.current || checkerScaleRef.current !== tileUnit || checkerThemeRef.current !== checkerThemeKey) {
         const tile = document.createElement('canvas');
         tile.width = tileUnit * 2;
         tile.height = tileUnit * 2;
         const tileCtx = tile.getContext('2d');
         if (tileCtx) {
-          tileCtx.fillStyle = '#1a1820';
+          tileCtx.fillStyle = themeChrome.checkerDark;
           tileCtx.fillRect(0, 0, tile.width, tile.height);
-          tileCtx.fillStyle = '#2a2730';
+          tileCtx.fillStyle = themeChrome.checkerLight;
           tileCtx.fillRect(0, 0, tileUnit, tileUnit);
           tileCtx.fillRect(tileUnit, tileUnit, tileUnit, tileUnit);
         }
         checkerTileRef.current = tile;
         checkerScaleRef.current = tileUnit;
+        checkerThemeRef.current = checkerThemeKey;
       }
       const pattern = ctx.createPattern(checkerTileRef.current, 'repeat');
       if (pattern) {
@@ -442,7 +567,109 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     }
     ctx.drawImage(frameCanvas, x, y, drawWidth, drawHeight);
     return true;
-  }, [alpha, getVideoBounds, setMediaDimensions]);
+  }, [alpha, checkerThemeKey, getVideoBounds, setMediaDimensions, themeChrome.checkerDark, themeChrome.checkerLight]);
+
+  const paintPreviewFrame = useCallback(async (bytes: Uint8Array): Promise<boolean> => {
+    const canvas = canvasRef.current;
+    const stage = stageRef.current;
+    const bounds = getVideoBounds();
+    if (!canvas || !stage || !bounds || bytes.byteLength === 0) return false;
+
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(new Blob([copy.buffer], { type: 'image/jpeg' }));
+    } catch {
+      return false;
+    }
+
+    try {
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.round(stage.clientWidth * pixelRatio));
+      const height = Math.max(1, Math.round(stage.clientHeight * pixelRatio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return false;
+      const x = Math.round(bounds.x * pixelRatio);
+      const y = Math.round(bounds.y * pixelRatio);
+      const drawWidth = Math.round(bounds.w * pixelRatio);
+      const drawHeight = Math.round(bounds.h * pixelRatio);
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(bitmap, x, y, drawWidth, drawHeight);
+      return true;
+    } finally {
+      bitmap.close();
+    }
+  }, [getVideoBounds]);
+
+  useLayoutEffect(() => {
+    if (!modalLayerOpen) return undefined;
+    const token = ++modalFrameTokenRef.current;
+
+    modalWasOpenRef.current = true;
+    setModalPreviewHidden(true);
+    setModalSnapshotStatus('loading');
+
+    if (!mpvActiveRef.current || mpvRenderer !== 'gpu') {
+      setModalSnapshotStatus('ready');
+      return undefined;
+    }
+
+    void (async () => {
+      let painted = false;
+      try {
+        const frame = await playerFrame(mpvPlayerId, 960);
+        if (token !== modalFrameTokenRef.current) return;
+        if (frame) painted = paintMpvFrame(frame);
+      } catch {
+        // Native GPU snapshots are optional; FFmpeg below is the reliable fallback.
+      }
+      if (!painted && filePathRef.current) {
+        try {
+          const bytes = await previewFrame(filePathRef.current, timeRef.current, 960);
+          if (token !== modalFrameTokenRef.current) return;
+          painted = await paintPreviewFrame(bytes);
+        } catch {
+          painted = false;
+        }
+      }
+      if (token === modalFrameTokenRef.current) {
+        setModalSnapshotStatus(painted ? 'ready' : 'failed');
+      }
+    })();
+
+    return undefined;
+  }, [modalLayerOpen, mpvPlayerId, mpvRenderer, paintMpvFrame, paintPreviewFrame]);
+
+  useLayoutEffect(() => {
+    if (modalLayerOpen) {
+      setNativeSurfaceRevealReady(false);
+      setModalPreviewHidden(true);
+      return undefined;
+    }
+    if (!modalWasOpenRef.current) return undefined;
+    if (modalSnapshotStatus === 'idle' || modalSnapshotStatus === 'loading') return undefined;
+    if (modalSnapshotStatus === 'failed') {
+      modalWasOpenRef.current = false;
+      setModalPreviewHidden(false);
+      setNativeSurfaceRevealReady(true);
+      return undefined;
+    }
+
+    setModalPreviewHidden(false);
+    const timer = window.setTimeout(() => {
+      modalWasOpenRef.current = false;
+      setNativeSurfaceRevealReady(true);
+      setModalSnapshotStatus('idle');
+    }, 160);
+    return () => window.clearTimeout(timer);
+  }, [modalLayerOpen, modalSnapshotStatus]);
 
   const reportTime = useCallback((nextTime: number, force = false) => {
     const now = performance.now();
@@ -662,30 +889,28 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     };
   }, [props.src, props.filePath, alpha, loadSource, revokeBlobUrl]);
 
-  // Initialise this component's libmpv worker once. The cached promise also makes
-  // React StrictMode's development-only effect replay harmless.
+  // Keep the native player alive while switching feature tabs. The shared
+  // initialization promise prevents overlapping remounts from recreating the HWND.
   useEffect(() => {
     if (!isTauriRuntime() || !props.filePath?.trim()) {
       setMpvPending(false);
       return undefined;
     }
+    const playerLease = acquireNativePlayerLease(mpvPlayerId);
     componentMountedRef.current = true;
-    if (mpvDestroyTimerRef.current !== null) {
-      window.clearTimeout(mpvDestroyTimerRef.current);
-      mpvDestroyTimerRef.current = null;
-    }
     setMpvPending(true);
     if (!mpvInitPromiseRef.current) {
-      const initPromise = playerInit(mpvPlayerId);
+      const initPromise = ensureNativePlayerInitialized(mpvPlayerId);
       mpvInitPromiseRef.current = initPromise;
       void initPromise.then((status) => {
         if (!componentMountedRef.current) {
-          void playerDestroy(mpvPlayerId);
+          scheduleNativePlayerDestroy(mpvPlayerId);
           return;
         }
         setMpvAvailable(status.available);
         if (!status.available) {
           if (mpvInitPromiseRef.current === initPromise) mpvInitPromiseRef.current = null;
+          nativePlayerInitPromises.delete(mpvPlayerId);
           setMpvPending(false);
           // Local desktop sources are intentionally not assigned to <video>
           // before mpv finishes initializing. A normal unavailable result must
@@ -709,13 +934,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     }
     return () => {
       componentMountedRef.current = false;
-      if (mpvDestroyTimerRef.current !== null) window.clearTimeout(mpvDestroyTimerRef.current);
-      mpvDestroyTimerRef.current = window.setTimeout(() => {
-        if (componentMountedRef.current) return;
-        mpvActiveRef.current = false;
-        mpvInitPromiseRef.current = null;
-        void playerDestroy(mpvPlayerId);
-      }, 0);
+      releaseNativePlayerLease(mpvPlayerId, playerLease);
     };
   }, [alpha, fallbackToBlob, mpvPlayerId, props.filePath]);
 
@@ -811,7 +1030,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     let cancelled = false;
     if (!shouldUseMpv) {
       setMpvMode(false);
-      setMpvPending(false);
+      if (!path) setMpvPending(false);
       return () => {
         cancelled = true;
       };
@@ -827,7 +1046,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     setMediaDimensions(0, 0);
     const load = async () => {
       try {
-        await queueSurfaceUpdate({ x: 0, y: 0, width: 1, height: 1, visible: false });
         if (cancelled || token !== mpvLoadTokenRef.current) return;
         mpvFirstFrameTimerRef.current = window.setTimeout(() => {
           if (cancelled || token !== mpvLoadTokenRef.current || mpvFirstFrameSeenRef.current) return;
@@ -861,7 +1079,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
       clearMpvFirstFrameTimer();
       if (token === mpvLoadTokenRef.current) mpvLoadTokenRef.current += 1;
     };
-  }, [alpha, clearMpvFirstFrameTimer, mpvAvailable, mpvPlayerId, props.filePath, props.src, queuePlayerLoad, queueSurfaceUpdate, setCropState, setMediaDimensions, setMpvMode, syncMpvStatus]);
+  }, [alpha, clearMpvFirstFrameTimer, mpvAvailable, mpvPlayerId, props.filePath, props.src, queuePlayerLoad, setCropState, setMediaDimensions, setMpvMode, syncMpvStatus]);
 
   // libmpv has no Tauri event bridge in this project, so keep UI state fresh
   // with a bounded poll instead of coupling the crop layer to HTMLMediaElement.
@@ -925,18 +1143,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
 
   // Native GPU surfaces own the hot selection path; React only supplies layout
   // and receives one committed selection when a drag finishes.
-  useEffect(() => {
-    if (!mpvActive || mpvRenderer !== 'gpu') {
-      if (mpvAvailable) {
-        void queueSurfaceUpdate({ x: 0, y: 0, width: 1, height: 1, visible: false })
+  useLayoutEffect(() => {
+    const generation = ++surfaceGenerationRef.current;
+    if (!mpvActive || mpvRenderer !== 'gpu' || !ready || modalLayerOpen
+      || !nativeSurfaceRevealReady) {
+      if (mpvAvailable && (modalLayerOpen || !mpvPending || !nativeSurfaceRevealReady)) {
+        void queueSurfaceUpdate({ x: 0, y: 0, width: 1, height: 1, visible: false }, generation)
           .catch((surfaceError) => console.error('[ShadowEncoder] hide native preview failed', surfaceError));
       }
-      return undefined;
+      return () => {
+        if (surfaceGenerationRef.current === generation) surfaceGenerationRef.current += 1;
+      };
     }
     let alive = true;
     let frame = 0;
     const updateSurface = () => {
-      if (!alive) return;
+      if (!alive || generation !== surfaceGenerationRef.current || isModalLayerOpen()) return;
       const stage = stageRef.current;
       const bounds = getVideoBounds();
       if (!stage || !bounds || bounds.w <= 0 || bounds.h <= 0) {
@@ -946,7 +1168,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
           width: 1,
           height: 1,
           visible: false,
-        }).catch((surfaceError) => console.error('[ShadowEncoder] hide invalid native preview failed', surfaceError));
+        }, generation).catch((surfaceError) => console.error('[ShadowEncoder] hide invalid native preview failed', surfaceError));
         return;
       }
       const stageRect = stage.getBoundingClientRect();
@@ -969,7 +1191,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
         selectionEnabled: cropEnabled,
         selectionLocked: cropLocked,
         aspectRatio: nativeCropAspect ?? undefined,
-      }).catch((surfaceError) => console.error('[ShadowEncoder] update native preview failed', surfaceError));
+        accentColor: nativeSelectionAccent,
+      }, generation).catch((surfaceError) => console.error('[ShadowEncoder] update native preview failed', surfaceError));
     };
     const schedule = () => {
       cancelAnimationFrame(frame);
@@ -990,8 +1213,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
       window.removeEventListener('scroll', schedule, true);
       window.visualViewport?.removeEventListener('resize', schedule);
       window.visualViewport?.removeEventListener('scroll', schedule);
+      if (surfaceGenerationRef.current === generation) surfaceGenerationRef.current += 1;
     };
-  }, [crop, cropEnabled, cropLocked, getVideoBounds, mediaLayoutRevision, mpvActive, mpvAvailable, mpvRenderer, nativeCropAspect, queueSurfaceUpdate, ready]);
+  }, [crop, cropEnabled, cropLocked, getVideoBounds, mediaLayoutRevision, modalLayerOpen, mpvActive, mpvAvailable, mpvPending, mpvRenderer, nativeCropAspect, nativeSelectionAccent, nativeSurfaceRevealReady, queueSurfaceUpdate, ready]);
 
   const applyFollowTime = useCallback((target: number) => {
     const safeTarget = Number.isFinite(target) ? Math.max(0, target) : 0;
@@ -1265,12 +1489,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     setMediaDimensions(event.currentTarget.videoWidth, event.currentTarget.videoHeight);
     durationRef.current = Number.isFinite(nextDuration) ? nextDuration : 0;
     setDuration(Number.isFinite(nextDuration) ? nextDuration : 0);
-    setReady(true);
     setError(null);
     webErrorRef.current = false;
     needPaintRef.current = true;
     restoreWebViewPlayback(event.currentTarget);
     if (monitorMode) applyFollowTime(pendingFollowTimeRef.current);
+  };
+
+  const handleLoadedData = () => {
+    if (mpvActiveRef.current) return;
+    setReady(true);
+    setError(null);
   };
 
   const handleSeeked = () => {
@@ -1337,6 +1566,28 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
       playingRef.current = false;
       needPaintRef.current = true;
     }
+  };
+
+  const stepFrame = (direction: PlayerFrameDirection) => {
+    if (!ready || controlsDisabled) return;
+    playingRef.current = false;
+    setPlaying(false);
+    if (mpvActiveRef.current) {
+      void playerStep(mpvPlayerId, direction)
+        .then(() => playerStatus(mpvPlayerId))
+        .then(syncMpvStatus)
+        .catch(() => { void switchToWebView(); });
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    const delta = direction === 'forward' ? WEBVIEW_FRAME_STEP_SECONDS : -WEBVIEW_FRAME_STEP_SECONDS;
+    const maxTime = Number.isFinite(video.duration) ? Math.max(0, video.duration) : Number.MAX_SAFE_INTEGER;
+    const nextTime = clamp(video.currentTime + delta, 0, maxTime);
+    video.currentTime = nextTime;
+    reportTime(nextTime, true);
+    needPaintRef.current = true;
   };
 
   const onSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1407,7 +1658,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     <div className="se-player">
       <div
         ref={stageRef}
-        className={`se-player-stage${mpvActive ? ' se-player-mpv' : ''}${!ready ? ' se-player-stage-idle' : ''}`}
+        className={`se-player-stage${mpvActive ? ' se-player-mpv' : ''}${!ready ? ' se-player-stage-idle' : ''}${modalPreviewHidden ? ' se-player-modal-hidden' : ''}`}
         style={{
           cursor: monitorMode ? 'default' : cropCursor,
         }}
@@ -1429,6 +1680,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
             playsInline
             preload={monitorMode ? 'auto' : 'metadata'}
             onLoadedMetadata={handleLoadedMetadata}
+            onLoadedData={handleLoadedData}
             onSeeked={handleSeeked}
             onPlay={() => {
               if (!mpvActiveRef.current) {
@@ -1465,6 +1717,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
             }}
             preload={monitorMode ? 'auto' : 'metadata'}
             onLoadedMetadata={handleLoadedMetadata}
+            onLoadedData={handleLoadedData}
             onSeeked={handleSeeked}
             onPlay={() => {
               if (!mpvActiveRef.current) {
@@ -1512,12 +1765,38 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
         )}
       </div>
       <div className="se-player-controls">
+        <button
+          type="button"
+          className="se-icon-btn"
+          onClick={() => stepFrame('backward')}
+          disabled={!ready || controlsDisabled || time <= 0}
+          title={monitorMode ? '编码进度跟随模式' : '上一帧'}
+          aria-label="上一帧"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <path d="M6 5v14" />
+            <path d="M18 5l-9 7 9 7V5z" />
+          </svg>
+        </button>
         <button type="button" className="se-icon-btn" onClick={togglePlay} disabled={!ready || controlsDisabled} title={monitorMode ? '编码进度跟随模式' : (playing ? '暂停' : '播放')}>
           {playing ? (
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="4" width="5" height="16" /><rect x="14" y="4" width="5" height="16" /></svg>
           ) : (
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 4l12 8-12 8V4z" /></svg>
           )}
+        </button>
+        <button
+          type="button"
+          className="se-icon-btn"
+          onClick={() => stepFrame('forward')}
+          disabled={!ready || controlsDisabled || (duration > 0 && time >= duration)}
+          title={monitorMode ? '编码进度跟随模式' : '下一帧'}
+          aria-label="下一帧"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <path d="M18 5v14" />
+            <path d="M6 5l9 7-9 7V5z" />
+          </svg>
         </button>
         {props.onRangeLoopingChange && (
           <button

@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use shadowencoder_agent_protocol::{
     error_code, local_endpoint_name, Actor, AgentCommand, AgentEvent, AgentRequest, AgentResponse,
     MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
@@ -14,6 +14,12 @@ enum ParsedCommand {
     Local(String),
     Request(AgentCommand, Option<i64>),
     Watch(Option<i64>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SendRequestError {
+    Unavailable(String),
+    Exchange(String),
 }
 
 fn main() {
@@ -318,8 +324,11 @@ fn send(command: AgentCommand, expected_revision: Option<i64>) -> AgentResponse 
     let request = build_request(command, expected_revision);
     match send_request(&request) {
         Ok(response) => response,
-        Err(message) => {
+        Err(SendRequestError::Unavailable(message)) => {
             AgentResponse::failure(request.request_id, error_code::APP_NOT_RUNNING, message)
+        }
+        Err(SendRequestError::Exchange(message)) => {
+            AgentResponse::failure(request.request_id, error_code::INTERNAL_ERROR, message)
         }
     }
 }
@@ -404,37 +413,41 @@ fn watch(after: Option<i64>) -> Result<(), AgentResponse> {
 }
 
 #[cfg(target_os = "windows")]
-fn send_request(request: &AgentRequest) -> Result<AgentResponse, String> {
+fn send_request(request: &AgentRequest) -> Result<AgentResponse, SendRequestError> {
     use std::fs::OpenOptions;
 
     let endpoint = local_endpoint_name();
     let mut last_error = None;
     for _ in 0..20 {
         match OpenOptions::new().read(true).write(true).open(&endpoint) {
-            Ok(mut pipe) => return exchange(&mut pipe, request),
+            Ok(mut pipe) => {
+                return exchange(&mut pipe, request).map_err(SendRequestError::Exchange)
+            }
             Err(error) => {
                 last_error = Some(error);
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
-    Err(format!(
+    Err(SendRequestError::Unavailable(format!(
         "ShadowEncoder 未启动或 Agent IPC 不可用 ({endpoint}): {}",
         last_error
             .map(|error| error.to_string())
             .unwrap_or_else(|| "unknown error".into())
-    ))
+    )))
 }
 
 #[cfg(unix)]
-fn send_request(request: &AgentRequest) -> Result<AgentResponse, String> {
+fn send_request(request: &AgentRequest) -> Result<AgentResponse, SendRequestError> {
     use std::os::unix::net::UnixStream;
 
     let endpoint = local_endpoint_name();
     let mut stream = UnixStream::connect(&endpoint).map_err(|error| {
-        format!("ShadowEncoder 未启动或 Agent IPC 不可用 ({endpoint}): {error}")
+        SendRequestError::Unavailable(format!(
+            "ShadowEncoder 未启动或 Agent IPC 不可用 ({endpoint}): {error}"
+        ))
     })?;
-    exchange(&mut stream, request)
+    exchange(&mut stream, request).map_err(SendRequestError::Exchange)
 }
 
 fn exchange<S: Read + Write>(
@@ -468,22 +481,20 @@ fn print_response(response: &AgentResponse) {
 }
 
 fn print_local_error(message: &str) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "ok": false,
-            "error": {
-                "code": error_code::VALIDATION_ERROR,
-                "message": message,
-            }
-        }))
-        .unwrap()
-    );
+    print_response(&local_error_response(message));
+}
+
+fn local_error_response(message: &str) -> AgentResponse {
+    AgentResponse::failure(
+        new_request_id(),
+        error_code::VALIDATION_ERROR,
+        message.to_string(),
+    )
 }
 
 fn command_help(command: &str) -> &'static str {
     match command {
-        "preset set" => "preset set <preset-id> <field> <value> --revision <n>\n修改一个标量字段。数组和对象会被拒绝。\n",
+        "preset set" => "preset set <preset-id> <field> <value> --revision <n>\n修改一个标量字段。数组和对象会被拒绝；布尔值使用不带引号的小写 true 或 false。\n",
         "preset item-add" => "preset item-add <preset-id> <field> <value> --revision <n>\n向允许的列表字段添加一项。\n",
         "preset item-remove" => "preset item-remove <preset-id> <field> <item-id> --revision <n>\n按 preset show 返回的 itemId 移除一项。\n",
         "workflow step-add" => "workflow step-add <workflow-id> <kind> --revision <n> [--parent <condition-id> --branch then|else]\n添加一个动作或条件步骤。\n",
@@ -532,12 +543,56 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_boolean_scalars() {
+        for (raw, expected) in [("true", true), ("false", false)] {
+            let args = strings(&["preset", "set", "p1", "twoPass", raw, "--revision", "7"]);
+            let parsed = parse_args(&args).unwrap();
+            assert!(matches!(
+                parsed,
+                ParsedCommand::Request(
+                    AgentCommand::PresetSetField {
+                        value: Value::Bool(value),
+                        ..
+                    },
+                    Some(7)
+                ) if value == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn parser_keeps_zero_and_one_as_numbers() {
+        for raw in ["0", "1"] {
+            assert!(matches!(parse_scalar(raw).unwrap(), Value::Number(_)));
+        }
+    }
+
+    #[test]
     fn help_is_available_without_ipc() {
         let parsed = parse_args(&strings(&["help"])).unwrap();
         match parsed {
             ParsedCommand::Local(text) => assert!(text.contains("# ShadowEncoder Agent CLI")),
             _ => panic!("help must be local"),
         }
+    }
+
+    #[test]
+    fn local_validation_errors_use_the_protocol_envelope() {
+        let response = local_error_response("bad argument");
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["protocolVersion"], PROTOCOL_VERSION);
+        assert!(value["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["code"], error_code::VALIDATION_ERROR);
+        assert_eq!(value["error"]["message"], "bad argument");
+    }
+
+    #[test]
+    fn invalid_ipc_payload_is_an_exchange_error() {
+        let request = build_request(AgentCommand::Status, None);
+        let mut stream = std::io::Cursor::new(b"not-json\n".to_vec());
+        let error = exchange(&mut stream, &request).unwrap_err();
+        assert!(error.contains("JSON"));
     }
 
     #[test]

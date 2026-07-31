@@ -1,15 +1,6 @@
 import type { MediaTreeListing, StorageVolume } from './ffmpeg';
 import type { WorkflowTrigger } from './workflow';
-
-const DIT_MEDIA_EXTENSIONS = new Set([
-  '3g2', '3gp', 'aac', 'ac3', 'aif', 'aiff', 'alac', 'amr', 'ape', 'ari', 'arw',
-  'asf', 'avi', 'avif', 'bmp', 'braw', 'caf', 'cin', 'cr2', 'cr3', 'crm', 'dng',
-  'dpx', 'dts', 'eac3', 'exr', 'flac', 'flv', 'gif', 'heic', 'heif', 'ico', 'jpeg',
-  'jpg', 'm2ts', 'm4a', 'm4v', 'mka', 'mkv', 'mov', 'mp2', 'mp3', 'mp4', 'mpeg',
-  'mpg', 'mts', 'mxf', 'nef', 'ogg', 'ogv', 'opus', 'orf', 'pcm', 'png', 'r3d',
-  'raf', 'raw', 'rm', 'rmvb', 'rw2', 'tga', 'tif', 'tiff', 'ts', 'vob', 'wav',
-  'webm', 'webp', 'wma', 'wmv',
-]);
+import { isMediaPath, mediaExtension } from './mediaExtensions.ts';
 
 export type WorkflowSourceFilter = {
   extensions: string[];
@@ -45,12 +36,6 @@ type NormalizedWorkflowSourceFilter = {
   recursive: boolean;
 };
 
-function extensionOf(path: string): string {
-  const filename = path.split(/[/\\]/).pop() ?? '';
-  const dot = filename.lastIndexOf('.');
-  return dot > -1 ? filename.slice(dot + 1).toLocaleLowerCase() : '';
-}
-
 function filePathKey(path: string): string {
   const normalized = path.trim().replace(/\\/g, '/').replace(/\/+$/, '');
   return /^[a-z]:(?:\/|$)/i.test(normalized) ? normalized.toLocaleLowerCase() : normalized;
@@ -76,8 +61,8 @@ function matchesSourceFilter(
   sizeBytes: number,
   filter: NormalizedWorkflowSourceFilter,
 ): boolean {
-  const extension = extensionOf(path);
-  return (!filter.mediaOnly || DIT_MEDIA_EXTENSIONS.has(extension))
+  const extension = mediaExtension(path);
+  return (!filter.mediaOnly || isMediaPath(path))
     && (filter.extensions.size === 0 || filter.extensions.has(extension))
     && sizeBytes >= filter.minimumBytes;
 }

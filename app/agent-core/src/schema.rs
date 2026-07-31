@@ -1,6 +1,6 @@
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-pub const PRESET_TYPES: [&str; 10] = [
+pub const PRESET_TYPES: [&str; 11] = [
     "encode",
     "mix",
     "check",
@@ -9,6 +9,7 @@ pub const PRESET_TYPES: [&str; 10] = [
     "segment",
     "gif",
     "webp",
+    "sequence",
     "backup",
     "workflow",
 ];
@@ -20,28 +21,35 @@ const OUTPUT_FIELDS: [&str; 4] = [
     "outputDirectory",
 ];
 
-const ENCODE_FIELDS: [&str; 29] = [
+const ENCODE_FIELDS: [&str; 36] = [
     "container",
     "videoCodec",
     "videoProfile",
     "crf",
     "preset",
     "tune",
+    "videoLevel",
     "pixelFormat",
+    "scaleMode",
+    "scaleEdge",
     "scaleW",
     "scaleH",
     "fps",
     "keepRes",
     "loudnorm",
     "audioOnly",
+    "noAudio",
     "audioCodec",
     "audioProfile",
     "audioBitrate",
     "videoBitrate",
+    "maxrate",
+    "bufsize",
     "audioSampleRate",
     "audioChannels",
     "unsharp",
     "denoise",
+    "deblock",
     "style",
     "rateMode",
     "targetFileSizeMb",
@@ -71,10 +79,11 @@ const BACKUP_SCALAR_FIELDS: [&str; 16] = [
     "outputDirectory",
 ];
 
-const BOOLEAN_FIELDS: [&str; 15] = [
+const BOOLEAN_FIELDS: [&str; 17] = [
     "keepRes",
     "loudnorm",
     "audioOnly",
+    "noAudio",
     "twoPass",
     "previewDuringEncode",
     "lnOn",
@@ -82,6 +91,7 @@ const BOOLEAN_FIELDS: [&str; 15] = [
     "recursive",
     "blackDetect",
     "fpsOriginal",
+    "fullDuration",
     "fixedDur",
     "mediaOnly",
     "verifyMd5",
@@ -89,25 +99,30 @@ const BOOLEAN_FIELDS: [&str; 15] = [
     "denoiseEnabled",
 ];
 
-const INTEGER_FIELDS: [&str; 14] = [
+const INTEGER_FIELDS: [&str; 16] = [
     "scaleW",
     "scaleH",
+    "scaleEdge",
     "audioBitrate",
     "videoBitrate",
+    "maxrate",
+    "bufsize",
     "audioSampleRate",
     "audioChannels",
-    "unsharp",
-    "denoise",
     "style",
     "w",
     "h",
     "quality",
+    "pngCompression",
     "minSizeMb",
     "targetFileSizeMb",
 ];
 
-const NUMBER_FIELDS: [&str; 10] = [
+const NUMBER_FIELDS: [&str; 13] = [
     "crf",
+    "unsharp",
+    "denoise",
+    "deblock",
     "fps",
     "lnI",
     "lnTp",
@@ -119,11 +134,10 @@ const NUMBER_FIELDS: [&str; 10] = [
     "trigger.settleSeconds",
 ];
 
-const CONTAINERS: [&str; 14] = [
+const CONTAINERS: [&str; 13] = [
     "mp4", "mkv", "mov", "webm", "avi", "flv", "ts", "mpeg", "wmv", "ogv", "3gp", "asf", "m4v",
-    "gif",
 ];
-const VIDEO_CODECS: [&str; 23] = [
+const VIDEO_CODECS: [&str; 21] = [
     "copy",
     "libx264",
     "libx265",
@@ -144,9 +158,7 @@ const VIDEO_CODECS: [&str; 23] = [
     "mpeg2video",
     "prores",
     "dnxhd",
-    "mjpeg",
     "ffv1",
-    "gif",
 ];
 const AUDIO_CODECS: [&str; 12] = [
     "copy",
@@ -220,10 +232,11 @@ pub fn validate_scalar_field(preset_type: &str, field: &str, value: &Value) -> R
         return Err(format!("{preset_type} 预设不存在可编辑字段 {field}"));
     }
 
-    if BOOLEAN_FIELDS.contains(&field) && !value.is_boolean() {
-        return Err(format!("字段 {field} 必须是 true 或 false"));
-    }
-    if INTEGER_FIELDS.contains(&field) {
+    if BOOLEAN_FIELDS.contains(&field) {
+        if !value.is_boolean() {
+            return Err(format!("字段 {field} 必须是 true 或 false"));
+        }
+    } else if INTEGER_FIELDS.contains(&field) {
         let number = value
             .as_i64()
             .ok_or_else(|| format!("字段 {field} 必须是整数"))?;
@@ -263,7 +276,18 @@ fn field_allowed(preset_type: &str, field: &str) -> bool {
             "refEncPresetId" | "fpsTol" | "recursive" | "blackDetect"
         ),
         "alpha" => matches!(field, "fpsOriginal" | "fps") || output,
-        "screenshot" => matches!(field, "aspect" | "customRatio" | "w" | "h") || output,
+        "screenshot" => {
+            matches!(
+                field,
+                "aspect"
+                    | "customRatio"
+                    | "w"
+                    | "h"
+                    | "imageFormat"
+                    | "quality"
+                    | "pngCompression"
+            ) || output
+        }
         "segment" => {
             matches!(
                 field,
@@ -289,6 +313,22 @@ fn field_allowed(preset_type: &str, field: &str) -> bool {
                 "aspect" | "customRatio" | "w" | "h" | "fps" | "quality" | "fixedDur" | "fixedVal"
             ) || output
         }
+        "sequence" => {
+            matches!(
+                field,
+                "aspect"
+                    | "customRatio"
+                    | "w"
+                    | "h"
+                    | "fps"
+                    | "imageFormat"
+                    | "quality"
+                    | "pngCompression"
+                    | "fullDuration"
+                    | "fixedDur"
+                    | "fixedVal"
+            ) || output
+        }
         "backup" => BACKUP_SCALAR_FIELDS.contains(&field),
         "workflow" => matches!(
             field,
@@ -301,55 +341,72 @@ fn field_allowed(preset_type: &str, field: &str) -> bool {
     }
 }
 
+fn integer_range(field: &str) -> Option<(i64, i64)> {
+    match field {
+        "scaleW" | "scaleH" => Some((0, 8192)),
+        "scaleEdge" => Some((0, 16384)),
+        "w" | "h" => Some((1, 8192)),
+        "quality" => Some((1, 100)),
+        "pngCompression" => Some((0, 9)),
+        "audioBitrate" | "videoBitrate" | "maxrate" | "bufsize" => Some((0, 2_000_000)),
+        "audioSampleRate" => Some((8_000, 384_000)),
+        "audioChannels" => Some((1, 32)),
+        "style" => Some((0, 2)),
+        "minSizeMb" | "targetFileSizeMb" => Some((0, 10_000_000)),
+        _ => None,
+    }
+}
+
 fn validate_integer_range(field: &str, value: i64) -> Result<(), String> {
-    let valid = match field {
-        "scaleW" | "scaleH" => (0..=8192).contains(&value),
-        "w" | "h" => (1..=8192).contains(&value),
-        "quality" => (1..=100).contains(&value),
-        "audioBitrate" | "videoBitrate" => (0..=1_000_000).contains(&value),
-        "audioSampleRate" => (8_000..=384_000).contains(&value),
-        "audioChannels" => (1..=32).contains(&value),
-        "unsharp" | "denoise" | "style" => (0..=10).contains(&value),
-        "minSizeMb" | "targetFileSizeMb" => (0..=10_000_000).contains(&value),
-        _ => true,
-    };
-    if valid {
+    if integer_range(field).map_or(true, |(minimum, maximum)| {
+        (minimum..=maximum).contains(&value)
+    }) {
         Ok(())
     } else {
         Err(format!("字段 {field} 超出允许范围"))
+    }
+}
+
+fn number_range(field: &str) -> Option<(f64, f64)> {
+    match field {
+        "crf" => Some((0.0, 63.0)),
+        "unsharp" => Some((0.0, 1.5)),
+        "denoise" => Some((0.0, 10.0)),
+        "deblock" => Some((0.0, 1.0)),
+        "fps" => Some((0.0, 240.0)),
+        "lnI" => Some((-70.0, -5.0)),
+        "lnTp" => Some((-9.0, 0.0)),
+        "lnLra" => Some((1.0, 50.0)),
+        "cpTh" => Some((-80.0, 0.0)),
+        "cpGain" => Some((-20.0, 40.0)),
+        "fpsTol" => Some((0.0, 10.0)),
+        "fixedVal" => Some((0.1, 9999.0)),
+        "trigger.settleSeconds" => Some((1.0, 30.0)),
+        _ => None,
     }
 }
 
 fn validate_number_range(field: &str, value: f64) -> Result<(), String> {
-    let valid = match field {
-        "crf" => (0.0..=63.0).contains(&value),
-        "fps" => (0.0..=240.0).contains(&value),
-        "lnI" => (-70.0..=-5.0).contains(&value),
-        "lnTp" => (-9.0..=0.0).contains(&value),
-        "lnLra" => (1.0..=50.0).contains(&value),
-        "cpTh" => (-80.0..=0.0).contains(&value),
-        "cpGain" => (-20.0..=40.0).contains(&value),
-        "fpsTol" => (0.0..=10.0).contains(&value),
-        "fixedVal" => (0.1..=9999.0).contains(&value),
-        "trigger.settleSeconds" => (1.0..=30.0).contains(&value),
-        _ => true,
-    };
-    if valid {
+    if number_range(field).map_or(true, |(minimum, maximum)| {
+        (minimum..=maximum).contains(&value)
+    }) {
         Ok(())
     } else {
         Err(format!("字段 {field} 超出允许范围"))
     }
 }
 
-fn validate_enum(field: &str, value: &str) -> Result<(), String> {
-    let allowed: Option<&[&str]> = match field {
+fn allowed_values(field: &str) -> Option<&'static [&'static str]> {
+    match field {
         "container" => Some(&CONTAINERS),
         "videoCodec" => Some(&VIDEO_CODECS),
         "audioCodec" => Some(&AUDIO_CODECS),
-        "rateMode" => Some(&["crf", "bitrate", "filesize"]),
-        "outputMode" => Some(&["source", "rename", "subdir", "fixed"]),
+        "rateMode" => Some(&["crf", "capped", "bitrate", "filesize"]),
+        "scaleMode" => Some(&["original", "dimensions", "longEdge", "shortEdge"]),
+        "outputMode" => Some(&["source", "rename", "subdir", "fixed", "fixedRename"]),
         "aspect" => Some(&["free", "1:1", "4:3", "16:9", "9:16", "match", "custom"]),
         "gifCompression" => Some(&["optimized", "compact", "aggressive"]),
+        "imageFormat" => Some(&["jpg", "png", "webp", "tiff", "bmp"]),
         "operation" => Some(&["copy", "move"]),
         "destinationNameMode" | "renameMode" => Some(&["original", "template"]),
         "directoryStructure" => Some(&["preserve", "flatten"]),
@@ -357,11 +414,54 @@ fn validate_enum(field: &str, value: &str) -> Result<(), String> {
         "trigger.kind" => Some(&["manual", "removable"]),
         "trigger.volumeKind" => Some(&["removable", "any"]),
         _ => None,
-    };
-    if allowed.is_some_and(|values| !values.contains(&value)) {
+    }
+}
+
+fn validate_enum(field: &str, value: &str) -> Result<(), String> {
+    if allowed_values(field).is_some_and(|values| !values.contains(&value)) {
         return Err(format!("字段 {field} 的值不在允许列表中"));
     }
     Ok(())
+}
+
+fn field_definition(field: &str) -> Value {
+    let mut definition = Map::new();
+    if BOOLEAN_FIELDS.contains(&field) {
+        definition.insert("type".into(), json!("boolean"));
+        definition.insert("cliValues".into(), json!(["true", "false"]));
+    } else if INTEGER_FIELDS.contains(&field) {
+        definition.insert("type".into(), json!("integer"));
+        if let Some((minimum, maximum)) = integer_range(field) {
+            definition.insert("minimum".into(), json!(minimum));
+            definition.insert("maximum".into(), json!(maximum));
+        }
+    } else if NUMBER_FIELDS.contains(&field) {
+        definition.insert("type".into(), json!("number"));
+        if let Some((minimum, maximum)) = number_range(field) {
+            definition.insert("minimum".into(), json!(minimum));
+            definition.insert("maximum".into(), json!(maximum));
+        }
+    } else {
+        definition.insert("type".into(), json!("string"));
+        definition.insert("maxLength".into(), json!(4096));
+        if let Some(values) = allowed_values(field) {
+            definition.insert("allowedValues".into(), json!(values));
+        }
+    }
+
+    if matches!(
+        field,
+        "audioBitrate" | "videoBitrate" | "maxrate" | "bufsize"
+    ) {
+        definition.insert("unit".into(), json!("kbps"));
+    } else if matches!(field, "scaleW" | "scaleH") {
+        definition.insert("unit".into(), json!("px"));
+    } else if field == "style" {
+        definition.insert("deprecated".into(), json!(true));
+        definition.insert("replacement".into(), json!("tune"));
+    }
+
+    Value::Object(definition)
 }
 
 pub fn schema_list() -> Value {
@@ -397,7 +497,15 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
             .into_iter()
             .chain(OUTPUT_FIELDS)
             .collect(),
-        "screenshot" => ["aspect", "customRatio", "w", "h"]
+        "screenshot" => [
+            "aspect",
+            "customRatio",
+            "w",
+            "h",
+            "imageFormat",
+            "quality",
+            "pngCompression",
+        ]
             .into_iter()
             .chain(OUTPUT_FIELDS)
             .collect(),
@@ -439,6 +547,22 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
         .into_iter()
         .chain(OUTPUT_FIELDS)
         .collect(),
+        "sequence" => [
+            "aspect",
+            "customRatio",
+            "w",
+            "h",
+            "fps",
+            "imageFormat",
+            "quality",
+            "pngCompression",
+            "fullDuration",
+            "fixedDur",
+            "fixedVal",
+        ]
+        .into_iter()
+        .chain(OUTPUT_FIELDS)
+        .collect(),
         "backup" => BACKUP_SCALAR_FIELDS.to_vec(),
         "workflow" => vec![
             "trigger.kind",
@@ -448,6 +572,10 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
         ],
         _ => Vec::new(),
     };
+    let field_definitions: Map<String, Value> = scalar_fields
+        .iter()
+        .map(|field| ((*field).to_string(), field_definition(field)))
+        .collect();
     let list_fields: Vec<&str> = if preset_type == "backup" {
         vec!["destinations", "extensions"]
     } else {
@@ -456,6 +584,7 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
     Some(json!({
         "function": preset_type,
         "scalarFields": scalar_fields,
+        "fieldDefinitions": field_definitions,
         "listFields": list_fields,
         "workflowStepFields": if preset_type == "workflow" {
             json!(["kind", "presetId", "presetRevision", "failureMode", "condition.kind", "condition.backupPresetId", "condition.reservePercent"])
@@ -488,5 +617,77 @@ mod tests {
     #[test]
     fn arbitrary_codec_is_rejected() {
         assert!(validate_scalar_field("encode", "videoCodec", &json!("-filter_complex")).is_err());
+    }
+
+    #[test]
+    fn encode_boolean_fields_accept_json_booleans() {
+        for field in [
+            "keepRes",
+            "twoPass",
+            "loudnorm",
+            "audioOnly",
+            "previewDuringEncode",
+        ] {
+            assert!(
+                validate_scalar_field("encode", field, &json!(true)).is_ok(),
+                "{field} should accept true"
+            );
+            assert!(
+                validate_scalar_field("encode", field, &json!(false)).is_ok(),
+                "{field} should accept false"
+            );
+            assert!(
+                validate_scalar_field("encode", field, &json!(1)).is_err(),
+                "{field} should reject numeric booleans"
+            );
+            assert!(
+                validate_scalar_field("encode", field, &json!(0)).is_err(),
+                "{field} should reject numeric booleans"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_schema_describes_cli_types_ranges_units_and_allowed_values() {
+        let schema = schema_show("encode").unwrap();
+        let fields = &schema["fieldDefinitions"];
+
+        assert_eq!(fields["twoPass"]["type"], "boolean");
+        assert_eq!(fields["twoPass"]["cliValues"], json!(["true", "false"]));
+        assert_eq!(fields["videoBitrate"]["type"], "integer");
+        assert_eq!(fields["videoBitrate"]["unit"], "kbps");
+        assert_eq!(fields["scaleH"]["minimum"], 0);
+        assert_eq!(fields["videoCodec"]["allowedValues"][1], "libx264");
+        assert_eq!(
+            fields["rateMode"]["allowedValues"],
+            json!(["crf", "capped", "bitrate", "filesize"])
+        );
+        assert_eq!(
+            fields["outputMode"]["allowedValues"],
+            json!(["source", "rename", "subdir", "fixed", "fixedRename"])
+        );
+        assert_eq!(fields["style"]["maximum"], 2);
+        assert_eq!(fields["style"]["deprecated"], true);
+        assert_eq!(fields["style"]["replacement"], "tune");
+    }
+
+    #[test]
+    fn legacy_style_rejects_values_without_backend_meaning() {
+        assert!(validate_scalar_field("encode", "style", &json!(0)).is_ok());
+        assert!(validate_scalar_field("encode", "style", &json!(2)).is_ok());
+        assert!(validate_scalar_field("encode", "style", &json!(3)).is_err());
+    }
+
+    #[test]
+    fn encode_schema_accepts_capped_rate_scaling_audio_and_filter_fields() {
+        assert!(validate_scalar_field("encode", "rateMode", &json!("capped")).is_ok());
+        assert!(validate_scalar_field("encode", "scaleMode", &json!("longEdge")).is_ok());
+        assert!(validate_scalar_field("encode", "scaleEdge", &json!(4096)).is_ok());
+        assert!(validate_scalar_field("encode", "maxrate", &json!(80_000)).is_ok());
+        assert!(validate_scalar_field("encode", "bufsize", &json!(160_000)).is_ok());
+        assert!(validate_scalar_field("encode", "noAudio", &json!(true)).is_ok());
+        assert!(validate_scalar_field("encode", "unsharp", &json!(0.8)).is_ok());
+        assert!(validate_scalar_field("encode", "denoise", &json!(2.5)).is_ok());
+        assert!(validate_scalar_field("encode", "deblock", &json!(0.2)).is_ok());
     }
 }

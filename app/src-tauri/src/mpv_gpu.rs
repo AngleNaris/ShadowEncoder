@@ -5,7 +5,7 @@
 //! over it. libmpv renders directly into the GL framebuffer; no RGBA/Base64 IPC
 //! is involved. The overlay is pass-through, keeping WebView crop interactions.
 
-use crate::mpv_player::{rotated_dimensions, PlayerStatus};
+use crate::mpv_player::{media_paths_match, rotated_dimensions, FrameDirection, PlayerStatus};
 use glib::{ControlFlow, MainContext, Priority};
 use gtk::prelude::*;
 use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
@@ -73,6 +73,11 @@ enum Request {
     Seek {
         player_id: String,
         time_sec: f64,
+        reply: mpsc::SyncSender<Result<(), String>>,
+    },
+    Step {
+        player_id: String,
+        direction: FrameDirection,
         reply: mpsc::SyncSender<Result<(), String>>,
     },
     SetVolume {
@@ -293,6 +298,14 @@ impl NativeGpuState {
         })
     }
 
+    pub fn step(&self, player_id: String, direction: FrameDirection) -> Result<Option<()>, String> {
+        self.request_unit(player_id.clone(), |reply| Request::Step {
+            player_id,
+            direction,
+            reply,
+        })
+    }
+
     pub fn set_volume(&self, player_id: String, volume: f64) -> Result<Option<()>, String> {
         self.request_unit(player_id.clone(), |reply| Request::SetVolume {
             player_id,
@@ -445,6 +458,9 @@ impl NativeUi {
                 reply,
             } => {
                 let result = self.with_player(&player_id, |player| {
+                    if !path.trim().is_empty() && media_paths_match(&player.path, &path) {
+                        return status_of(player);
+                    }
                     if path.trim().is_empty() {
                         player.mpv.command("stop", &[]).map_err(map_mpv_error)?;
                         player.path.clear();
@@ -506,6 +522,23 @@ impl NativeUi {
                     player
                         .mpv
                         .command("seek", &[&time_sec.max(0.0).to_string(), "absolute"])
+                        .map_err(map_mpv_error)
+                });
+                let _ = reply.send(result);
+            }
+            Request::Step {
+                player_id,
+                direction,
+                reply,
+            } => {
+                let result = self.with_player(&player_id, |player| {
+                    player
+                        .mpv
+                        .set_property("pause", true)
+                        .map_err(map_mpv_error)?;
+                    player
+                        .mpv
+                        .command(direction.mpv_command(), &[])
                         .map_err(map_mpv_error)
                 });
                 let _ = reply.send(result);

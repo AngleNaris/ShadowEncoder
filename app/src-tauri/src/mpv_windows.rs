@@ -28,7 +28,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const SURFACE_CLASS_NAME: &str = "ShadowEncoderMpvSurface";
 const OVERLAY_CLASS_NAME: &str = "ShadowEncoderMpvOverlay";
 const MAIN_THREAD_TIMEOUT: Duration = Duration::from_secs(5);
-const OVERLAY_ACCENT: u32 = 0x00c88aff;
+const DEFAULT_OVERLAY_ACCENT: u32 = 0x00cf9ca8;
 const OVERLAY_PART_COUNT: usize = 8;
 const SELECTION_EVENT_NAME: &str = "mpv-selection-committed";
 const MOUSE_LEFT_BUTTON: usize = 0x0001;
@@ -85,6 +85,8 @@ pub struct SurfaceConfig {
     pub selection_locked: bool,
     #[serde(default)]
     pub aspect_ratio: Option<f64>,
+    #[serde(default)]
+    pub accent_color: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -120,6 +122,7 @@ pub(crate) struct SelectionOverlayUpdate {
     pub surface_width: i32,
     pub surface_height: i32,
     pub locked: bool,
+    pub accent_bgr: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -156,6 +159,7 @@ struct NativeInteraction {
     enabled: bool,
     locked: bool,
     aspect_ratio: Option<f64>,
+    accent_bgr: u32,
     rect: Option<SelectionRect>,
     drag: Option<DragState>,
     overlay_tx: Option<mpsc::Sender<SelectionOverlayUpdate>>,
@@ -173,6 +177,7 @@ impl NativeInteraction {
             enabled: false,
             locked: false,
             aspect_ratio: None,
+            accent_bgr: DEFAULT_OVERLAY_ACCENT,
             rect: None,
             drag: None,
             overlay_tx: None,
@@ -192,6 +197,7 @@ impl NativeInteraction {
             surface_width: self.surface_width,
             surface_height: self.surface_height,
             locked: self.locked,
+            accent_bgr: self.accent_bgr,
         }
     }
 
@@ -501,7 +507,7 @@ unsafe fn draw_overlay(hwnd: HWND) {
     let mut client: RECT = unsafe { std::mem::zeroed() };
     unsafe {
         GetClientRect(hwnd, &mut client);
-        fill_rect(hdc, client, OVERLAY_ACCENT);
+        fill_rect(hdc, client, DEFAULT_OVERLAY_ACCENT);
     }
     unsafe { EndPaint(hwnd, &paint) };
     OVERLAY_PAINT_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -522,6 +528,22 @@ unsafe extern "system" fn overlay_window_proc(
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
+}
+
+fn parse_accent_bgr(value: Option<&str>) -> u32 {
+    let Some(hex) = value.and_then(|color| color.strip_prefix('#')) else {
+        return DEFAULT_OVERLAY_ACCENT;
+    };
+    if hex.len() != 6 {
+        return DEFAULT_OVERLAY_ACCENT;
+    }
+    let Ok(rgb) = u32::from_str_radix(hex, 16) else {
+        return DEFAULT_OVERLAY_ACCENT;
+    };
+    let red = (rgb >> 16) & 0xff;
+    let green = (rgb >> 8) & 0xff;
+    let blue = rgb & 0xff;
+    (blue << 16) | (green << 8) | red
 }
 
 fn wide_null(value: &str) -> Vec<u16> {
@@ -874,6 +896,7 @@ impl NativeGpuState {
         let aspect_ratio = config
             .aspect_ratio
             .filter(|value| value.is_finite() && *value > 0.0);
+        let accent_bgr = parse_accent_bgr(config.accent_color.as_deref());
         let stroke = (2.0 * scale).round().max(1.0) as i32;
         let handle = (8.0 * scale).round().max(6.0) as i32;
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
@@ -914,6 +937,7 @@ impl NativeGpuState {
                         interaction.enabled = selection_enabled;
                         interaction.locked = selection_locked;
                         interaction.aspect_ratio = aspect_ratio;
+                        interaction.accent_bgr = accent_bgr;
                         if interaction.drag.is_none() {
                             interaction.rect = crop;
                         }
@@ -991,6 +1015,13 @@ mod tests {
         state.locked = true;
         assert!(!state.begin(10, 10));
         assert_eq!(state.rect, Some(rect));
+    }
+
+    #[test]
+    fn accent_hex_is_converted_to_windows_bgr() {
+        assert_eq!(parse_accent_bgr(Some("#3f7f5f")), 0x005f7f3f);
+        assert_eq!(parse_accent_bgr(Some("invalid")), DEFAULT_OVERLAY_ACCENT);
+        assert_eq!(parse_accent_bgr(None), DEFAULT_OVERLAY_ACCENT);
     }
 
     #[test]

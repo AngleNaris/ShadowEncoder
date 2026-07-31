@@ -6,7 +6,7 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use libmpv2::Mpv;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::ptr;
@@ -57,10 +57,27 @@ enum PlayerOperation {
     Pause,
     Toggle,
     Seek(f64),
+    Step(FrameDirection),
     SetVolume(f64),
     Status,
     Frame(i32),
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FrameDirection {
+    Backward,
+    Forward,
+}
+
+impl FrameDirection {
+    pub(crate) fn mpv_command(self) -> &'static str {
+        match self {
+            Self::Backward => "frame-back-step",
+            Self::Forward => "frame-step",
+        }
+    }
 }
 
 enum PlayerReply {
@@ -192,6 +209,7 @@ fn run_windows_gpu_smoke(native: NativeGpuState, path: String) -> Result<PlayerS
             selection_enabled: true,
             selection_locked: false,
             aspect_ratio: None,
+            accent_color: None,
         },
     ) {
         let _ = native.destroy(&player_id);
@@ -683,8 +701,13 @@ fn selection_to_ass(update: SelectionOverlayUpdate) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     let fill = format!("m {left} {top} l {right} {top} {right} {bottom} {left} {bottom}");
+    let accent_bgr = if update.accent_bgr == 0 {
+        0x00cf9ca8
+    } else {
+        update.accent_bgr & 0x00ffffff
+    };
     Some(format!(
-        "{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HCF9CA8&\\alpha&HD9&\\p1}}{fill}{{\\p0}}\n{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HCF9CA8&\\alpha&H00&\\p1}}{drawing}{{\\p0}}"
+        "{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H{accent_bgr:06X}&\\alpha&HD9&\\p1}}{fill}{{\\p0}}\n{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H{accent_bgr:06X}&\\alpha&H00&\\p1}}{drawing}{{\\p0}}"
     ))
 }
 
@@ -727,6 +750,13 @@ fn handle_operation(
     match operation {
         PlayerOperation::Load(next_path) => {
             debug_log(format!("load path={next_path}"));
+            if !next_path.trim().is_empty() && media_paths_match(path, &next_path) {
+                let status = status_of(mpv, path, gpu)?;
+                if status.ready {
+                    debug_log("load reused current media");
+                    return Ok(PlayerReply::Status(status));
+                }
+            }
             if next_path.trim().is_empty() {
                 mpv.command("stop", &[]).map_err(map_mpv_error)?;
                 path.clear();
@@ -811,6 +841,12 @@ fn handle_operation(
                 .map_err(map_mpv_error)?;
             Ok(PlayerReply::Unit)
         }
+        PlayerOperation::Step(direction) => {
+            mpv.set_property("pause", true).map_err(map_mpv_error)?;
+            mpv.command(direction.mpv_command(), &[])
+                .map_err(map_mpv_error)?;
+            Ok(PlayerReply::Unit)
+        }
         PlayerOperation::SetVolume(volume) => {
             if !volume.is_finite() {
                 return Err("音量必须是有限数值".into());
@@ -850,7 +886,7 @@ fn handle_operation(
     }
 }
 
-fn media_paths_match(left: &str, right: &str) -> bool {
+pub(crate) fn media_paths_match(left: &str, right: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         left.replace('\\', "/")
@@ -1239,6 +1275,29 @@ pub async fn player_seek(
 }
 
 #[tauri::command]
+pub async fn player_step(
+    state: State<'_, MpvState>,
+    player_id: String,
+    direction: FrameDirection,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let native = state.native.clone();
+        let id = player_id.clone();
+        if run_off_main_thread(move || native.step(id, direction))
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+    match request_worker(state, &player_id, PlayerOperation::Step(direction))? {
+        PlayerReply::Unit => Ok(()),
+        _ => Err("libmpv 返回了无效的逐帧结果".into()),
+    }
+}
+
+#[tauri::command]
 pub async fn player_set_volume(
     state: State<'_, MpvState>,
     player_id: String,
@@ -1379,6 +1438,12 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn frame_directions_map_to_native_mpv_commands() {
+        assert_eq!(FrameDirection::Backward.mpv_command(), "frame-back-step");
+        assert_eq!(FrameDirection::Forward.mpv_command(), "frame-step");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn selection_ass_contains_border_handles_and_surface_coordinates() {
@@ -1390,12 +1455,26 @@ mod tests {
             surface_width: 320,
             surface_height: 180,
             locked: false,
+            accent_bgr: 0,
         })
         .expect("selection overlay");
         assert!(ass.contains("m 10 20 l 110 20 110 22 10 22"));
         assert!(ass.contains("m 5 15 l 15 15 15 25 5 25"));
         assert!(ass.contains("\\1c&HCF9CA8&"));
         assert!(ass.contains("\\alpha&HD9&"));
+
+        let custom = selection_to_ass(SelectionOverlayUpdate {
+            accent_bgr: 0x005f7f3f,
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 60,
+            surface_width: 320,
+            surface_height: 180,
+            locked: false,
+        })
+        .expect("custom selection overlay");
+        assert!(custom.contains("\\1c&H5F7F3F&"));
 
         assert!(selection_to_ass(SelectionOverlayUpdate {
             surface_width: 320,
@@ -1506,6 +1585,14 @@ mod tests {
         ));
         assert!(matches!(
             worker.request(PlayerOperation::Seek(2.0)),
+            Ok(PlayerReply::Unit)
+        ));
+        assert!(matches!(
+            worker.request(PlayerOperation::Step(FrameDirection::Forward)),
+            Ok(PlayerReply::Unit)
+        ));
+        assert!(matches!(
+            worker.request(PlayerOperation::Step(FrameDirection::Backward)),
             Ok(PlayerReply::Unit)
         ));
         assert!(matches!(

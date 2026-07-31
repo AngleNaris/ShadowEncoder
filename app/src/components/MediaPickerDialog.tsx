@@ -14,6 +14,7 @@ import {
   type MediaBrowserEntry,
   type MediaBrowserListing,
 } from '../lib/ffmpeg';
+import { useModalLayerRegistration } from '../lib/modalLayer';
 
 type SelectedMedia = Pick<MediaBrowserEntry, 'name' | 'path' | 'isDirectory'>;
 type SortKey = 'name' | 'modified' | 'size' | 'type';
@@ -137,6 +138,7 @@ export function MediaPickerDialog({ open, onClose, onConfirm }: {
   onClose: () => void;
   onConfirm: (paths: string[]) => void;
 }) {
+  useModalLayerRegistration(open);
   const [listing, setListing] = useState<MediaBrowserListing | null>(null);
   const [selected, setSelected] = useState<Map<string, SelectedMedia>>(() => new Map());
   const [focusedPath, setFocusedPath] = useState('');

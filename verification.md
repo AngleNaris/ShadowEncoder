@@ -2,6 +2,24 @@
 
 日期：2026-07-30
 
+## Windows 2.2.1 发布验证
+
+- 日期：2026-07-31。
+- `cd app && npm test`：89/89 通过。
+- `cargo test --manifest-path app/agent-protocol/Cargo.toml`：3/3 通过。
+- `cargo test --manifest-path app/agent-core/Cargo.toml`：14/14 通过。
+- `cargo test --manifest-path app/agent-cli/Cargo.toml`：8/8 通过。
+- `cargo test --manifest-path app/src-tauri/Cargo.toml --bin shadowencoder`：38 通过、1 项按环境忽略。
+- `cd app && npm run package:portable`：使用独立 `CARGO_TARGET_DIR` 完成 TypeScript、Vite、CLI、Tauri、MSI、NSIS 与便携版构建。
+- 便携版 `--portable-verify` 返回 0，内置 FFmpeg 与 FFprobe 均从自解压目录实际运行。
+- 转码默认输出已移除 `_se` 后缀；同名文件通过唯一文件名逻辑安全避让，对应前后端回归测试通过。
+
+| 产物 | 大小 | SHA-256 |
+| --- | ---: | --- |
+| `ShadowEncoder_2.2.1_x64-portable.exe` | 91,566,194 字节 | `48A3DC548CA34E5C0528DFF4553FB6BB443F00963BC6107C14FB4B1110149210` |
+| `ShadowEncoder_2.2.1_x64-setup.exe` | 91,735,830 字节 | `ED6FE520E581FB57B6E68B860A2C59DE6B02C5BCDD8B85CD66F1FE6F46964616` |
+| `ShadowEncoder_2.2.1_x64_en-US.msi` | 125,464,576 字节 | `68FF653128BFEE22E21208DEF8AB1AD3A10EC6AD6A3777137DCF01D613664759` |
+
 ## 便携版生产协议修复
 
 - 根因：旧 Windows release 构建未启用 Cargo `custom-protocol` 特性，Tauri 因而加载开发地址 `http://127.0.0.1:1420`，在用户机器上显示“连接被拒绝”。

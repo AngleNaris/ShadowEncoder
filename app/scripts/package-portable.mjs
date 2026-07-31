@@ -6,7 +6,10 @@ import { fileURLToPath } from 'node:url';
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(appRoot, '..');
 const packageJson = JSON.parse(readFileSync(resolve(appRoot, 'package.json'), 'utf8'));
-const releaseRoot = resolve(appRoot, 'src-tauri', 'target', 'release');
+const cargoTargetDirectory = process.env.CARGO_TARGET_DIR
+  ? resolve(appRoot, process.env.CARGO_TARGET_DIR)
+  : resolve(appRoot, 'src-tauri', 'target');
+const releaseRoot = resolve(cargoTargetDirectory, 'release');
 const outputDirectory = resolve(releaseRoot, 'bundle', 'portable');
 const output = resolve(
   outputDirectory,

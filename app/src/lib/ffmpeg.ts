@@ -28,7 +28,7 @@ export interface CropRect {
 
 export type GifCompression = 'optimized' | 'compact' | 'aggressive';
 
-export type OutputMode = 'source' | 'rename' | 'subdir' | 'fixed';
+export type OutputMode = 'source' | 'rename' | 'subdir' | 'fixed' | 'fixedRename';
 
 export interface OutputSettings {
   mode: OutputMode;
@@ -394,6 +394,10 @@ export function playerToggle(playerId: string): Promise<boolean> {
 export function playerSeek(playerId: string, timeSec: number): Promise<void> {
   return invoke('player_seek', { playerId, timeSec });
 }
+export type PlayerFrameDirection = 'backward' | 'forward';
+export function playerStep(playerId: string, direction: PlayerFrameDirection): Promise<void> {
+  return invoke('player_step', { playerId, direction });
+}
 export function playerSetVolume(playerId: string, volume: number): Promise<void> {
   return invoke('player_set_volume', { playerId, volume });
 }
@@ -430,6 +434,7 @@ export interface PlayerSurface {
   selectionEnabled?: boolean;
   selectionLocked?: boolean;
   aspectRatio?: number;
+  accentColor?: string;
 }
 
 /** Position the platform-native GPU surface over the matching WebView video bounds. */
@@ -448,9 +453,9 @@ export async function toBlobUrl(path: string): Promise<string> {
 export function composeAlpha(input: string, fps: number | null, outputOptions: OutputSettings) {
   return invoke<string>('compose_alpha', { input, fps, outputOptions });
 }
-export function screenshotFrame(input: string, timeSec: number, width: number, height: number, crop: CropRect | null, outputOptions: OutputSettings) {
+export function screenshotFrame(input: string, timeSec: number, width: number, height: number, imageFormat: string, quality: number, pngCompression: number, crop: CropRect | null, outputOptions: OutputSettings) {
   const c = crop && crop.w > 0 && crop.h > 0 ? [crop.x, crop.y, crop.w, crop.h] : null;
-  return invoke<string>('screenshot', { input, timeSec, width, height, crop: c, outputOptions });
+  return invoke<string>('screenshot', { input, timeSec, width, height, imageFormat, quality, pngCompression, crop: c, outputOptions });
 }
 export function exportGif(input: string, start: number, duration: number, fps: number, width: number, height: number, compression: GifCompression, crop: CropRect | null, outputOptions: OutputSettings) {
   const c = crop && crop.w > 0 && crop.h > 0 ? [crop.x, crop.y, crop.w, crop.h] : null;
@@ -459,6 +464,10 @@ export function exportGif(input: string, start: number, duration: number, fps: n
 export function exportWebp(input: string, start: number, duration: number, fps: number, width: number, height: number, quality: number, crop: CropRect | null, outputOptions: OutputSettings) {
   const c = crop && crop.w > 0 && crop.h > 0 ? [crop.x, crop.y, crop.w, crop.h] : null;
   return invoke<string>('export_webp', { input, start, duration, fps, width, height, quality, crop: c, outputOptions });
+}
+export function exportImageSequence(input: string, start: number, duration: number, fps: number, width: number, height: number, imageFormat: string, quality: number, pngCompression: number, crop: CropRect | null, outputOptions: OutputSettings) {
+  const c = crop && crop.w > 0 && crop.h > 0 ? [crop.x, crop.y, crop.w, crop.h] : null;
+  return invoke<string>('export_image_sequence', { input, start, duration, fps, width, height, imageFormat, quality, pngCompression, crop: c, outputOptions });
 }
 export function exportSegment(input: string, start: number, duration: number, fps: number, width: number, height: number, outFormat: string, crop: CropRect | null, outputOptions: OutputSettings, videoCodec = '', videoProfile = '', crf = 0, videoBitrate = 0, pixelFormat = '', audioCodec = '', audioBitrate = 0) {
   const c = crop && crop.w > 0 && crop.h > 0 ? [crop.x, crop.y, crop.w, crop.h] : null;
@@ -474,12 +483,17 @@ export function transcode(opts: {
   speedPreset: string;
   tune: string;
   style: number;
+  videoLevel: string;
   pixelFormat: string;
   container: string;
+  scaleMode: string;
+  scaleEdge: number;
   scaleW: number;
   scaleH: number;
   fps: number;
   videoBitrate: number;
+  maxrate: number;
+  bufsize: number;
   audioCodec: string;
   audioProfile: string;
   audioBitrate: number;
@@ -487,8 +501,10 @@ export function transcode(opts: {
   audioChannels: number;
   unsharp: number;
   denoise: number;
+  deblock: number;
   loudnorm: boolean;
   audioOnly: boolean;
+  noAudio: boolean;
   keepRes: boolean;
   rateMode: string;
   targetFileSizeMb: number;
@@ -517,6 +533,9 @@ export function runDitBackup(request: DitBackupRequest) {
 }
 export function updateCheck() {
   return invoke<any>('update_check');
+}
+export function openUrl(url: string) {
+  return invoke<void>('open_url', { url });
 }
 
 // ── 工具 ──────────────────────────────────────────────────────

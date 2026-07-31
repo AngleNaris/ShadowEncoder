@@ -9,7 +9,8 @@ test('ComboBox 共用标签结构，但仅菜单项使用固定标签列', async
     readFile(new URL('../src/lib/muiTheme.ts', import.meta.url), 'utf8'),
   ]);
 
-  assert.match(ui, /export type ComboBoxOption = \{[\s\S]*tags\?: readonly \(string \| number\)\[\]/);
+  assert.match(ui, /export type ComboBoxOption = \{[\s\S]*tags\?: readonly \(string \| number\)\[\][\s\S]*group\?: string/);
+  assert.match(ui, /options\.flatMap\(\(o, index\) => \{[\s\S]*<ListSubheader[\s\S]*o\.group/);
   assert.match(ui, /selected \? <ComboBoxOptionContent option=\{selected\} \/> : s/);
   assert.match(ui, /<MenuItem[\s\S]*<ComboBoxOptionContent option=\{o\} tagAreaWidth=\{menuTagAreaWidth\} \/>/);
   assert.match(theme, /\.se-combo-option-label[\s\S]*text-overflow: ellipsis/);
@@ -25,7 +26,9 @@ test('编码与导出选项不再把附加说明拼进主文字', async () => {
     readFile(new URL('../src/components/presetSystem.tsx', import.meta.url), 'utf8'),
   ]);
 
-  assert.match(tabs, /label: 'H\.264', value: 'libx264', tags: \['libx264'\]/);
+  assert.match(tabs, /label: 'H\.264', value: 'libx264', tags: \['CPU'\], group: '软件编码'/);
+  assert.match(tabs, /label: 'H\.265\/HEVC', value: 'hevc_qsv', tags: \['Intel'\], group: 'Intel GPU'/);
+  assert.doesNotMatch(tabs, /tags: \['(?:libx264|libx265|h264_nvenc|hevc_nvenc|h264_qsv|hevc_qsv)'/);
   assert.match(tabs, /label: 'medium', value: 'medium', tags: \['默认'\]/);
   assert.match(tabs, /label: 'yuv420p', value: 'yuv420p', tags: \['最兼容'\]/);
   assert.match(tabs, /label: '1920 × 1080', value: '1920x1080', tags: \['1080p'\]/);

@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.0"><strong>下载 v2.2.0</strong></a>
+  <a href="https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.1"><strong>下载 v2.2.1</strong></a>
   &nbsp;·&nbsp;
   <a href="./docs/agent-cli-design.md">Agent CLI</a>
   &nbsp;·&nbsp;
@@ -46,7 +46,7 @@ ShadowEncoder 是一个 Windows 桌面应用，把日常做视频时那些零散
 
 ## 预设：把一套参数存下来，下次一键套上
 
-几乎每个功能页都接了同一套预设系统——转码、混音、检测、透明通道、截图、截取、GIF、WebP、DIT 备份、DIT 流程，一共十类，各自独立管理。
+几乎每个功能页都接了同一套预设系统——转码、混音、检测、透明通道、截图、序列帧、截取、GIF、WebP、DIT 备份、DIT 流程，一共十一类，各自独立管理。
 
 - **存的是整套参数**。比如一个转码预设，封装、编码器、CRF、帧率、音频码率、缩放、调优风格这些字段会一起存下来，下次从下拉框选中就全部套用，不用一个个重填。
 - **管理弹窗里能看清每一项**。左边是预设列表（可拖动排序），右边一栏编辑、一栏实时汇总当前选了哪些参数，改哪一项、值是多少一目了然。
@@ -90,9 +90,9 @@ shadowencoder-cli help
 
 | 文件 | 适合谁 |
 | --- | --- |
-| `ShadowEncoder_2.2.0_x64-portable.exe` | 单文件便携版，图省事的话选它——ShadowEncoder、Gifski、FFmpeg、FFprobe、libmpv 和 CLI 全打包在里面了 |
-| `ShadowEncoder_2.2.0_x64-setup.exe` | 常规的 Windows 安装程序 |
-| `ShadowEncoder_2.2.0_x64_en-US.msi` | 走 Windows Installer 部署时用 |
+| `ShadowEncoder_2.2.1_x64-portable.exe` | 单文件便携版，图省事的话选它——ShadowEncoder、Gifski、FFmpeg、FFprobe、libmpv 和 CLI 全打包在里面了 |
+| `ShadowEncoder_2.2.1_x64-setup.exe` | 常规的 Windows 安装程序 |
+| `ShadowEncoder_2.2.1_x64_en-US.msi` | 走 Windows Installer 部署时用 |
 
 便携版启动时会把运行时静默解到临时目录，程序退出后自动清理，不会在系统里留下一堆东西。WebView2 用的是 Windows 10/11 自带的系统运行时（Tauri 需要它）。
 

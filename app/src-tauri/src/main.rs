@@ -19,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
@@ -143,6 +143,27 @@ fn unique_output_path(path: PathBuf) -> Result<PathBuf, String> {
     Err(format!("无法为同名输出生成唯一文件名: {}", path.display()))
 }
 
+fn unique_output_directory(path: PathBuf) -> Result<PathBuf, String> {
+    if !path.exists() {
+        return Ok(path);
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let directory_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("无法为同名序列帧目录生成唯一名称: {}", path.display()))?;
+    for index in 2..=1_000_000_u32 {
+        let candidate = parent.join(format!("{directory_name}_{index}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "无法为同名序列帧目录生成唯一名称: {}",
+        path.display()
+    ))
+}
+
 fn resolve_output_path(
     input: &str,
     options: Option<&OutputOptions>,
@@ -170,7 +191,7 @@ fn resolve_output_path(
                     .unwrap_or(default_name),
             )
         }
-        "rename" => {
+        mode @ ("rename" | "fixedRename") => {
             let template = options
                 .map(|value| value.name_template.trim())
                 .filter(|value| !value.is_empty())
@@ -221,7 +242,17 @@ fn resolve_output_path(
             }
             let mut file_name = PathBuf::from(rendered);
             file_name.set_extension(extension);
-            parent.join(file_name)
+            let destination = if mode == "fixedRename" {
+                Path::new(
+                    options
+                        .map(|value| value.directory.trim())
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "请选择指定输出目录".to_string())?,
+                )
+            } else {
+                parent
+            };
+            destination.join(file_name)
         }
         "subdir" => parent
             .join(ensure_simple_relative_dir(
@@ -788,49 +819,140 @@ fn sanitize_crop_for_input(
     }
 }
 
-/// 常见视频扩展名
-fn is_video(p: &str) -> bool {
-    let low = p.to_lowercase();
-    [
-        "mp4", "mov", "mkv", "avi", "webm", "m4v", "flv", "wmv", "ts", "m2ts",
-    ]
-    .iter()
-    .any(|e| low.ends_with(e))
+#[derive(Clone, Copy)]
+enum InputMediaKind {
+    AudioVisual,
+    Video,
 }
 
-/// 把目录展开为其中的视频文件列表（recursive 控制是否递归）
-fn expand_inputs(paths: &[String], recursive: bool) -> Vec<String> {
+#[derive(Default)]
+struct ExpandedInputs {
+    files: Vec<String>,
+    skipped: usize,
+}
+
+fn is_video_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "3g2"
+            | "3gp"
+            | "asf"
+            | "avi"
+            | "flv"
+            | "m2ts"
+            | "m4v"
+            | "mkv"
+            | "mov"
+            | "mp4"
+            | "mpeg"
+            | "mpg"
+            | "mts"
+            | "mxf"
+            | "ogv"
+            | "rm"
+            | "rmvb"
+            | "ts"
+            | "vob"
+            | "webm"
+            | "wmv"
+    )
+}
+
+fn is_audio_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "aac"
+            | "ac3"
+            | "aif"
+            | "aiff"
+            | "alac"
+            | "amr"
+            | "ape"
+            | "caf"
+            | "dts"
+            | "eac3"
+            | "flac"
+            | "m4a"
+            | "mka"
+            | "mp2"
+            | "mp3"
+            | "ogg"
+            | "opus"
+            | "pcm"
+            | "wav"
+            | "wma"
+    )
+}
+
+fn is_supported_input(path: &Path, kind: InputMediaKind) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match kind {
+        InputMediaKind::AudioVisual => {
+            is_video_extension(&extension) || is_audio_extension(&extension)
+        }
+        InputMediaKind::Video => is_video_extension(&extension),
+    }
+}
+
+fn ensure_video_input(input: &str) -> Result<(), String> {
+    if is_supported_input(Path::new(input), InputMediaKind::Video) {
+        Ok(())
+    } else {
+        Err(format!("当前功能不支持该素材类型: {input}"))
+    }
+}
+
+/// 把目录展开为当前功能支持的媒体文件列表（recursive 控制是否递归）。
+fn expand_inputs(paths: &[String], recursive: bool, kind: InputMediaKind) -> ExpandedInputs {
     let mut out: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
     for p in paths {
         let meta = std::fs::metadata(p);
         if let Ok(m) = meta {
             if m.is_dir() {
-                collect_dir(p, recursive, &mut out);
-            } else {
+                collect_dir(p, recursive, kind, &mut out, &mut skipped);
+            } else if is_supported_input(Path::new(p), kind) {
                 out.push(p.clone());
+            } else {
+                skipped += 1;
             }
-        } else {
+        } else if is_supported_input(Path::new(p), kind) {
+            // 保留支持扩展名的失效路径，让后续错误仍能准确指出文件不存在。
             out.push(p.clone());
+        } else {
+            skipped += 1;
         }
     }
     let mut seen = std::collections::HashSet::new();
     out.retain(|path| seen.insert(normalized_path_text(Path::new(path))));
-    out
+    ExpandedInputs {
+        files: out,
+        skipped,
+    }
 }
 
-fn collect_dir(dir: &str, recursive: bool, out: &mut Vec<String>) {
+fn collect_dir(
+    dir: &str,
+    recursive: bool,
+    kind: InputMediaKind,
+    out: &mut Vec<String>,
+    skipped: &mut usize,
+) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let path = e.path();
             if path.is_dir() {
                 if recursive {
-                    collect_dir(&path.to_string_lossy(), recursive, out);
+                    collect_dir(&path.to_string_lossy(), recursive, kind, out, skipped);
                 }
+            } else if is_supported_input(&path, kind) {
+                out.push(path.to_string_lossy().to_string());
             } else {
-                let s = path.to_string_lossy().to_string();
-                if is_video(&s) {
-                    out.push(s);
-                }
+                *skipped += 1;
             }
         }
     }
@@ -844,6 +966,7 @@ fn compose_alpha_blocking(
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<String, String> {
+    ensure_video_input(&input)?;
     let output = resolve_output_path(&input, output_options.as_ref(), "_alpha", "mov")?
         .to_string_lossy()
         .to_string();
@@ -881,17 +1004,60 @@ fn compose_alpha_blocking(
     Ok(output)
 }
 
+fn still_image_format(image_format: &str) -> Result<(&'static str, &'static str), String> {
+    match image_format.trim().to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => Ok(("jpg", "mjpeg")),
+        "png" => Ok(("png", "png")),
+        "webp" => Ok(("webp", "libwebp")),
+        "tif" | "tiff" => Ok(("tiff", "tiff")),
+        "bmp" => Ok(("bmp", "bmp")),
+        _ => Err("图片格式仅支持 JPEG、PNG、WebP、TIFF 和 BMP".into()),
+    }
+}
+
+fn append_still_image_encoding_args(
+    args: &mut Vec<String>,
+    extension: &str,
+    quality: i32,
+    png_compression: i32,
+) {
+    let quality = quality.clamp(1, 100);
+    match extension {
+        "jpg" => {
+            let qscale = 2 + ((100 - quality) * 29 / 99);
+            args.extend(["-q:v".into(), qscale.to_string()]);
+        }
+        "webp" => args.extend(["-quality".into(), quality.to_string()]),
+        "png" => args.extend([
+            "-compression_level".into(),
+            png_compression.clamp(0, 9).to_string(),
+        ]),
+        _ => {}
+    }
+}
+
 fn screenshot_blocking(
     input: String,
     time_sec: f32,
     width: i32,
     height: i32,
+    image_format: String,
+    quality: i32,
+    png_compression: i32,
     crop: Option<(i32, i32, i32, i32)>,
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<String, String> {
+    ensure_video_input(&input)?;
+    if !time_sec.is_finite() || time_sec < 0.0 {
+        return Err("截图时间必须是大于或等于 0 的有限数值".into());
+    }
+    if !(1..=8192).contains(&width) || !(1..=8192).contains(&height) {
+        return Err("截图输出尺寸必须在 1 到 8192 像素之间".into());
+    }
+    let (extension, encoder) = still_image_format(&image_format)?;
     let suffix = format!("_screenshot_{time_sec:.2}s");
-    let output = resolve_output_path(&input, output_options.as_ref(), &suffix, "png")?
+    let output = resolve_output_path(&input, output_options.as_ref(), &suffix, extension)?
         .to_string_lossy()
         .to_string();
     let crop = sanitize_crop_for_input(&input, crop)?;
@@ -902,7 +1068,7 @@ fn screenshot_blocking(
         }
     }
     vf.push(format!("scale={width}:{height}"));
-    let args = vec![
+    let mut args = vec![
         "-y".into(),
         "-ss".into(),
         time_sec.to_string(),
@@ -912,8 +1078,11 @@ fn screenshot_blocking(
         "1".into(),
         "-vf".into(),
         vf.join(","),
-        output.clone(),
+        "-c:v".into(),
+        encoder.into(),
     ];
+    append_still_image_encoding_args(&mut args, extension, quality, png_compression);
+    args.push(output.clone());
     emit_log(
         &window,
         &format!("截图: {} @ {:.3}s -> {}", input, time_sec, output.clone()),
@@ -1248,6 +1417,7 @@ fn export_gif_blocking(
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<String, String> {
+    ensure_video_input(&input)?;
     if !start.is_finite() || start < 0.0 {
         return Err("GIF 起始时间必须是大于或等于 0 的有限数值".into());
     }
@@ -1364,6 +1534,7 @@ fn export_webp_blocking(
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<String, String> {
+    ensure_video_input(&input)?;
     let output = resolve_output_path(&input, output_options.as_ref(), "", "webp")?
         .to_string_lossy()
         .to_string();
@@ -1401,6 +1572,82 @@ fn export_webp_blocking(
     ];
     emit_log(&window, &format!("导出 WebP: {} -> {}", input, output));
     run_with_progress(&args, dur, &window, "导出 WebP")?;
+    emit_log(&window, &format!("输出位置: {output}"));
+    Ok(output)
+}
+
+fn export_image_sequence_blocking(
+    input: String,
+    start: f32,
+    duration: f32,
+    fps: f32,
+    width: i32,
+    height: i32,
+    image_format: String,
+    quality: i32,
+    png_compression: i32,
+    crop: Option<(i32, i32, i32, i32)>,
+    output_options: Option<OutputOptions>,
+    window: tauri::Window,
+) -> Result<String, String> {
+    ensure_video_input(&input)?;
+    if !start.is_finite() || start < 0.0 {
+        return Err("序列帧起始时间必须是大于或等于 0 的有限数值".into());
+    }
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err("序列帧时长必须是大于 0 的有限数值".into());
+    }
+    if !fps.is_finite() || !(0.1..=120.0).contains(&fps) {
+        return Err("序列帧帧率必须在 0.1 到 120 之间".into());
+    }
+    if !(1..=8192).contains(&width) || !(1..=8192).contains(&height) {
+        return Err("序列帧输出尺寸必须在 1 到 8192 像素之间".into());
+    }
+    let (extension, encoder) = still_image_format(&image_format)
+        .map_err(|_| "序列帧图片格式仅支持 JPEG、PNG、WebP、TIFF 和 BMP".to_string())?;
+    let marker = resolve_output_path(&input, output_options.as_ref(), "_frames", extension)?;
+    // 序列帧始终按素材落到独立目录；同名素材或重复导出自动追加序号。
+    let output_directory = unique_output_directory(marker.with_extension(""))?;
+    std::fs::create_dir_all(&output_directory).map_err(|error| {
+        format!(
+            "无法创建序列帧输出目录 {}: {error}",
+            output_directory.display()
+        )
+    })?;
+    let crop = sanitize_crop_for_input(&input, crop)?;
+    let mut filters = Vec::new();
+    if let Some((x, y, crop_width, crop_height)) = crop {
+        filters.push(format!("crop={crop_width}:{crop_height}:{x}:{y}"));
+    }
+    filters.push(format!("scale={width}:{height}:flags=lanczos"));
+    filters.push(format!("fps={fps}"));
+    let output_pattern = output_directory.join(format!("frame_%06d.{extension}"));
+    let mut args = vec![
+        "-y".into(),
+        "-ss".into(),
+        start.to_string(),
+        "-i".into(),
+        input.clone(),
+        "-t".into(),
+        duration.to_string(),
+        "-vf".into(),
+        filters.join(","),
+        "-an".into(),
+        "-c:v".into(),
+        encoder.into(),
+    ];
+    append_still_image_encoding_args(&mut args, extension, quality, png_compression);
+    args.extend([
+        "-start_number".into(),
+        "1".into(),
+        output_pattern.to_string_lossy().to_string(),
+    ]);
+    emit_log(
+        &window,
+        &format!("导出序列帧: {} -> {}", input, output_directory.display()),
+    );
+    run_with_progress(&args, duration, &window, "导出序列帧")?;
+    let output = output_directory.to_string_lossy().to_string();
     emit_log(&window, &format!("输出位置: {output}"));
     Ok(output)
 }
@@ -1518,6 +1765,7 @@ fn export_segment_blocking(
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<String, String> {
+    ensure_video_input(&input)?;
     let output = resolve_output_path(&input, output_options.as_ref(), "_clip", &out_format)?
         .to_string_lossy()
         .to_string();
@@ -1587,6 +1835,164 @@ fn cleanup_passlog(prefix: &Path) {
     }
 }
 
+fn build_scale_filter(
+    scale_mode: &str,
+    scale_edge: i32,
+    scale_w: i32,
+    scale_h: i32,
+    keep_res: bool,
+) -> Option<String> {
+    let mode = if scale_mode.is_empty() {
+        if keep_res {
+            "original"
+        } else if scale_w > 0 && scale_h > 0 {
+            "dimensions"
+        } else {
+            "original"
+        }
+    } else {
+        scale_mode
+    };
+    match mode {
+        "dimensions" if scale_w > 0 && scale_h > 0 => Some(format!("scale={scale_w}:{scale_h}")),
+        "longEdge" if scale_edge > 0 => Some(format!(
+            "scale=if(gte(iw\\,ih)\\,{scale_edge}\\,-2):if(gte(iw\\,ih)\\,-2\\,{scale_edge})"
+        )),
+        "shortEdge" if scale_edge > 0 => Some(format!(
+            "scale=if(lte(iw\\,ih)\\,{scale_edge}\\,-2):if(lte(iw\\,ih)\\,-2\\,{scale_edge})"
+        )),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_audio_args(
+    args: &mut Vec<String>,
+    audio_codec: &str,
+    audio_profile: &str,
+    audio_bitrate: i32,
+    audio_sample_rate: i32,
+    audio_channels: i32,
+    loudnorm: bool,
+) {
+    args.push("-c:a".into());
+    if audio_codec.is_empty() || audio_codec == "copy" {
+        args.push("copy".into());
+        return;
+    }
+
+    args.push(audio_codec.to_string());
+    if audio_bitrate > 0 {
+        args.extend(["-b:a".into(), format!("{audio_bitrate}k")]);
+    }
+    if audio_sample_rate > 0 {
+        args.extend(["-ar".into(), audio_sample_rate.to_string()]);
+    }
+    if audio_channels > 0 {
+        args.extend(["-ac".into(), audio_channels.to_string()]);
+    }
+    if audio_codec == "aac" && !audio_profile.is_empty() && audio_profile != "lc" {
+        let profile = match audio_profile {
+            "he" | "he-aac" => "aac_he",
+            "he_v2" | "hev2-aac" => "aac_he_v2",
+            _ => "aac_low",
+        };
+        args.extend(["-profile:a".into(), profile.into()]);
+    }
+    if loudnorm {
+        args.extend(["-af".into(), "loudnorm=I=-9:TP=0:LRA=7".into()]);
+    }
+}
+
+fn append_video_rate_control(
+    args: &mut Vec<String>,
+    codec: &str,
+    rate_mode: &str,
+    crf: i32,
+    effective_bitrate: i32,
+    maxrate: i32,
+    bufsize: i32,
+) {
+    let bitrate_mode = matches!(rate_mode, "bitrate" | "filesize");
+    let quality_mode = matches!(rate_mode, "" | "crf" | "capped");
+    match codec {
+        "libx264" | "libx265" | "libvpx" | "libvpx-vp9" | "libsvtav1" | "libaom-av1" => {
+            if bitrate_mode {
+                args.extend(["-b:v".into(), format!("{}k", effective_bitrate.max(1))]);
+            } else if quality_mode {
+                args.extend(["-crf".into(), crf.to_string()]);
+                if matches!(codec, "libvpx" | "libvpx-vp9") {
+                    args.extend(["-b:v".into(), "0".into()]);
+                }
+            }
+        }
+        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => {
+            if bitrate_mode {
+                args.extend(["-b:v".into(), format!("{}k", effective_bitrate.max(1))]);
+            } else if quality_mode {
+                args.extend(["-cq".into(), crf.to_string(), "-b:v".into(), "0".into()]);
+            }
+        }
+        "h264_qsv" | "hevc_qsv" | "av1_qsv" => {
+            if bitrate_mode {
+                args.extend(["-b:v".into(), format!("{}k", effective_bitrate.max(1))]);
+            } else if quality_mode {
+                args.extend(["-global_quality".into(), crf.to_string()]);
+            }
+        }
+        "h264_amf" | "hevc_amf" | "av1_amf" => {
+            if bitrate_mode {
+                args.extend(["-b:v".into(), format!("{}k", effective_bitrate.max(1))]);
+            } else if quality_mode {
+                args.extend([
+                    "-qp_i".into(),
+                    crf.to_string(),
+                    "-qp_p".into(),
+                    crf.to_string(),
+                ]);
+            }
+        }
+        "mpeg4" | "mpeg2video" => {
+            args.extend(["-b:v".into(), format!("{}k", effective_bitrate.max(1))]);
+        }
+        // These codecs derive bitrate from their profile or are lossless.
+        "prores" | "dnxhd" | "ffv1" => {}
+        _ => {
+            if bitrate_mode {
+                args.extend(["-b:v".into(), format!("{}k", effective_bitrate.max(1))]);
+            }
+        }
+    }
+    if rate_mode == "capped" {
+        if maxrate > 0 {
+            args.extend(["-maxrate".into(), format!("{}k", maxrate)]);
+        }
+        if bufsize > 0 {
+            args.extend(["-bufsize".into(), format!("{}k", bufsize)]);
+        }
+    }
+}
+
+fn append_video_profile(args: &mut Vec<String>, codec: &str, profile: &str) {
+    if profile.is_empty() {
+        return;
+    }
+    let mapped = match codec {
+        "prores" => match profile {
+            "proxy" => "0",
+            "lt" => "1",
+            "422" => "2",
+            "422hq" => "3",
+            "4444" => "4",
+            "4444xq" => "5",
+            _ => return,
+        },
+        "libx264" | "libx265" | "dnxhd" => profile,
+        _ => return,
+    };
+    args.extend(["-profile:v".into(), mapped.into()]);
+}
+
 fn transcode_blocking(
     paths: Vec<String>,
     video_codec: String,
@@ -1595,21 +2001,28 @@ fn transcode_blocking(
     speed_preset: String,
     tune: String,
     style: i32,
+    video_level: String,
     pixel_format: String,
     container: String,
+    scale_mode: String,
+    scale_edge: i32,
     scale_w: i32,
     scale_h: i32,
     fps: f32,
     video_bitrate: i32,
+    maxrate: i32,
+    bufsize: i32,
     audio_codec: String,
     audio_profile: String,
     audio_bitrate: i32,
     audio_sample_rate: i32,
     audio_channels: i32,
-    unsharp: i32,
-    denoise: i32,
+    unsharp: f64,
+    denoise: f64,
+    deblock: f64,
     loudnorm: bool,
     audio_only: bool,
+    no_audio: bool,
     keep_res: bool,
     rate_mode: String,
     target_file_size_mb: f64,
@@ -1617,16 +2030,39 @@ fn transcode_blocking(
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<Vec<String>, String> {
-    let _ = keep_res; // 缩放由 scale_w/scale_h 决定，保留字段以兼容前端
-    let files = expand_inputs(&paths, false);
+    let input_kind = if audio_only {
+        InputMediaKind::AudioVisual
+    } else {
+        InputMediaKind::Video
+    };
+    let expanded = expand_inputs(&paths, false, input_kind);
+    if expanded.skipped > 0 {
+        emit_log(
+            &window,
+            &format!("[SKIP] 已跳过 {} 个不支持的文件", expanded.skipped),
+        );
+    }
+    let files = expanded.files;
     emit_log(&window, &format!("开始转码，共 {} 个文件", files.len()));
 
     let vc = video_codec.as_str();
-    // libx264 / libx265 支持 profile / preset / tune；其它编码器按需忽略
-    let supports_pp = matches!(vc, "libx264" | "libx265");
+    let encoder = if vc == "prores" { "prores_ks" } else { vc };
+    // Only x264/x265 expose the speed and tune controls used by this form.
+    let supports_speed_tune = matches!(vc, "libx264" | "libx265");
+    let supports_level = matches!(
+        vc,
+        "libx264"
+            | "libx265"
+            | "h264_nvenc"
+            | "hevc_nvenc"
+            | "h264_amf"
+            | "hevc_amf"
+            | "h264_qsv"
+            | "hevc_qsv"
+    );
 
     // -tune：显式 tune 优先；否则用 style（原“风格”语义）兜底
-    let tune_value: Option<String> = if !tune.is_empty() && tune != "none" {
+    let tune_value: Option<String> = if supports_speed_tune && !tune.is_empty() && tune != "none" {
         Some(tune.clone())
     } else {
         match style {
@@ -1654,12 +2090,53 @@ fn transcode_blocking(
             "等待处理",
         );
         let dur = probe_duration(p);
-        let out = resolve_output_path(p, output_options.as_ref(), "_se", ext)?
+        let out = resolve_output_path(p, output_options.as_ref(), "", ext)?
             .to_string_lossy()
             .to_string();
 
-        // ── 仅音频 / 视频流复制：视频直接 copy，只处理封装与音频轨 ──
-        if audio_only || vc == "copy" {
+        // ── 仅音频：显式移除视频轨，不再误用视频流复制 ──
+        if audio_only {
+            let mut c = vec!["-y".into(), "-i".into(), p.clone(), "-vn".into()];
+            append_audio_args(
+                &mut c,
+                &audio_codec,
+                &audio_profile,
+                audio_bitrate,
+                audio_sample_rate,
+                audio_channels,
+                loudnorm,
+            );
+            c.push(out.clone());
+            emit_log(&window, &format!("仅输出音频: {}", p));
+            run_with_progress_source(
+                &c,
+                dur,
+                &window,
+                "提取音频",
+                Some(p),
+                ProgressContext {
+                    file_index,
+                    file_count: files.len(),
+                    phase_index: 0,
+                    phase_count: 1,
+                },
+            )?;
+            emit_log(&window, &format!("输出位置: {out}"));
+            outputs.push(out);
+            emit_file_log(
+                &window,
+                "file_end",
+                file_index + 1,
+                files.len(),
+                p,
+                "pass",
+                "处理完成",
+            );
+            continue;
+        }
+
+        // ── 视频流复制：只处理封装与音频轨 ──
+        if vc == "copy" {
             let mut c = vec![
                 "-y".into(),
                 "-i".into(),
@@ -1667,28 +2144,18 @@ fn transcode_blocking(
                 "-c:v".into(),
                 "copy".into(),
             ];
-            c.push("-c:a".into());
-            if audio_codec == "copy" || audio_codec.is_empty() {
-                c.push("copy".into());
+            if no_audio {
+                c.push("-an".into());
             } else {
-                c.push(audio_codec.clone());
-                if audio_bitrate > 0 {
-                    c.push("-b:a".into());
-                    c.push(format!("{}k", audio_bitrate));
-                }
-                if audio_sample_rate > 0 {
-                    c.push("-ar".into());
-                    c.push(audio_sample_rate.to_string());
-                }
-                if audio_channels > 0 {
-                    c.push("-ac".into());
-                    c.push(audio_channels.to_string());
-                }
-            }
-            // 音频也是 copy 时不能挂滤镜（-af 与 -c:a copy 互斥）
-            if loudnorm && audio_codec != "copy" && !audio_codec.is_empty() {
-                c.push("-af".into());
-                c.push("loudnorm=I=-9:TP=0:LRA=7".into());
+                append_audio_args(
+                    &mut c,
+                    &audio_codec,
+                    &audio_profile,
+                    audio_bitrate,
+                    audio_sample_rate,
+                    audio_channels,
+                    loudnorm,
+                );
             }
             c.push(out.clone());
             emit_log(&window, &format!("视频流复制，处理封装/音频: {}", p));
@@ -1696,7 +2163,7 @@ fn transcode_blocking(
                 &c,
                 dur,
                 &window,
-                "音频处理",
+                "封装处理",
                 Some(p),
                 ProgressContext {
                     file_index,
@@ -1723,11 +2190,16 @@ fn transcode_blocking(
         // 码控模式：filesize > bitrate > crf（兼容旧调用：rate_mode 为空时按 video_bitrate>0 判）
         let is_filesize = rate_mode == "filesize" && target_file_size_mb > 0.0;
         let is_bitrate = rate_mode == "bitrate" || (rate_mode.is_empty() && video_bitrate > 0);
+        let is_capped = rate_mode == "capped";
         // 按目标文件体积计算码率（每文件不同，需用 ffprobe 取时长）
         let eff_bitrate = if is_filesize {
             let target_bits = target_file_size_mb * 8_388_608.0; // MB → bits (1024*1024*8)
             if dur > 0.0 {
-                let abr = if audio_bitrate > 0 && !audio_codec.is_empty() && audio_codec != "copy" {
+                let abr = if !no_audio
+                    && audio_bitrate > 0
+                    && !audio_codec.is_empty()
+                    && audio_codec != "copy"
+                {
                     audio_bitrate as f64
                 } else {
                     0.0
@@ -1742,12 +2214,13 @@ fn transcode_blocking(
         } else {
             0
         };
-        let mut quality: Vec<String> = vec!["-c:v".into(), vc.to_string()];
-        if supports_pp && !video_profile.is_empty() {
-            quality.push("-profile:v".into());
-            quality.push(video_profile.clone());
+        let mut quality: Vec<String> = vec!["-c:v".into(), encoder.to_string()];
+        append_video_profile(&mut quality, vc, &video_profile);
+        if supports_level && !video_level.is_empty() {
+            quality.push("-level:v".into());
+            quality.push(video_level.clone());
         }
-        if supports_pp && !speed_preset.is_empty() {
+        if supports_speed_tune && !speed_preset.is_empty() {
             quality.push("-preset".into());
             quality.push(speed_preset.clone());
         }
@@ -1759,46 +2232,51 @@ fn transcode_blocking(
             quality.push("-pix_fmt".into());
             quality.push(pixel_format.clone());
         }
-        match vc {
-            "libx264" | "libx265" | "libvpx" | "libvpx-vp9" => {
-                if is_bitrate || is_filesize {
-                    quality.push("-b:v".into());
-                    quality.push(format!("{}k", eff_bitrate));
-                } else {
-                    quality.push("-crf".into());
-                    quality.push(crf.to_string());
-                    // VP8/VP9 的 CRF 模式需显式 -b:v 0
-                    if vc == "libvpx-vp9" || vc == "libvpx" {
-                        quality.push("-b:v".into());
-                        quality.push("0".into());
-                    }
-                }
-            }
-            _ => {
-                // mpeg4 / mpeg2 / av1 等不支持 CRF：用固定码率（未指定给默认）
-                let vb = if is_bitrate || is_filesize {
-                    eff_bitrate
-                } else {
-                    2000
-                };
-                quality.push("-b:v".into());
-                quality.push(format!("{}k", vb));
-            }
-        }
+        let effective_rate_mode = if is_filesize {
+            "filesize"
+        } else if is_bitrate {
+            "bitrate"
+        } else if is_capped {
+            "capped"
+        } else {
+            "crf"
+        };
+        let default_bitrate = if matches!(vc, "mpeg4" | "mpeg2video") {
+            eff_bitrate.max(2000)
+        } else {
+            eff_bitrate
+        };
+        append_video_rate_control(
+            &mut quality,
+            vc,
+            effective_rate_mode,
+            crf,
+            default_bitrate,
+            maxrate,
+            bufsize,
+        );
 
         // ── 视频滤镜链 ──
         let mut vf: Vec<String> = Vec::new();
-        if scale_w > 0 && scale_h > 0 {
-            vf.push(format!("scale={}:{}", scale_w, scale_h));
+        if let Some(scale) = build_scale_filter(&scale_mode, scale_edge, scale_w, scale_h, keep_res)
+        {
+            vf.push(scale);
         }
         if fps > 0.0 {
             vf.push(format!("fps={}", fps));
         }
-        if unsharp > 0 {
-            vf.push("unsharp=5:5:1.5:5:5:0".into());
+        if unsharp > 0.0 {
+            vf.push(format!("unsharp=5:5:{unsharp:.2}:5:5:0"));
         }
-        if denoise > 0 {
-            vf.push("hqdn3d".into());
+        if denoise > 0.0 {
+            vf.push(format!("hqdn3d={denoise:.2}:{:.2}", denoise * 0.75));
+        }
+        if deblock > 0.0 {
+            vf.push(format!(
+                "deblock=filter=strong:block=8:alpha={deblock:.2}:beta={deblock:.2}:gamma={:.2}:delta={:.2}",
+                deblock * 0.5,
+                deblock * 0.5,
+            ));
         }
         let vf_str = if vf.is_empty() {
             String::new()
@@ -1807,50 +2285,24 @@ fn transcode_blocking(
         };
 
         // ── 音频参数 ──
-        let mut audio: Vec<String> = vec!["-c:a".into()];
-        if audio_codec == "copy" {
-            audio.push("copy".into());
-        } else {
-            audio.push(audio_codec.clone());
-            if audio_bitrate > 0 {
-                audio.push("-b:a".into());
-                audio.push(format!("{}k", audio_bitrate));
-            }
-            if audio_sample_rate > 0 {
-                audio.push("-ar".into());
-                audio.push(audio_sample_rate.to_string());
-            }
-            if audio_channels > 0 {
-                audio.push("-ac".into());
-                audio.push(audio_channels.to_string());
-            }
-            if audio_codec == "aac" && !audio_profile.is_empty() && audio_profile != "lc" {
-                let ap = match audio_profile.as_str() {
-                    "he" => "aac_he",
-                    "he_v2" => "aac_he_v2",
-                    _ => "aac_low",
-                };
-                audio.push("-profile:a".into());
-                audio.push(ap.to_string());
-            }
-        }
-
-        let af = if loudnorm {
-            Some("loudnorm=I=-9:TP=0:LRA=7".to_string())
-        } else {
-            None
-        };
-
         let mut output_args = vec!["-y".into(), "-i".into(), p.clone()];
         output_args.extend(quality.iter().cloned());
         if !vf_str.is_empty() {
             output_args.push("-vf".into());
             output_args.push(vf_str.clone());
         }
-        output_args.extend(audio.iter().cloned());
-        if let Some(a) = &af {
-            output_args.push("-af".into());
-            output_args.push(a.clone());
+        if no_audio {
+            output_args.push("-an".into());
+        } else {
+            append_audio_args(
+                &mut output_args,
+                &audio_codec,
+                &audio_profile,
+                audio_bitrate,
+                audio_sample_rate,
+                audio_channels,
+                loudnorm,
+            );
         }
         output_args.push("-f".into());
         output_args.push(ext.to_string());
@@ -1964,7 +2416,14 @@ fn mix_blocking(
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<Vec<String>, String> {
-    let files = expand_inputs(&paths, false);
+    let expanded = expand_inputs(&paths, false, InputMediaKind::AudioVisual);
+    if expanded.skipped > 0 {
+        emit_log(
+            &window,
+            &format!("[SKIP] 已跳过 {} 个不支持的文件", expanded.skipped),
+        );
+    }
+    let files = expanded.files;
     emit_log(&window, &format!("开始混音，共 {} 个文件", files.len()));
     let mut outputs = Vec::new();
     for (file_index, p) in files.iter().enumerate() {
@@ -2069,7 +2528,14 @@ fn check_blocking(
         pass_with_warnings: 0,
         fail: 0,
     };
-    let files = expand_inputs(&paths, recursive);
+    let expanded = expand_inputs(&paths, recursive, InputMediaKind::Video);
+    if expanded.skipped > 0 {
+        emit_log(
+            &window,
+            &format!("[SKIP] 已跳过 {} 个不支持的文件", expanded.skipped),
+        );
+    }
+    let files = expanded.files;
     emit_log(&window, &format!("开始检测，共 {} 个文件", files.len()));
     let standard_fps: [f32; 8] = [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0];
     for (file_index, p) in files.iter().enumerate() {
@@ -3957,6 +4423,39 @@ fn open_path(path: String) -> Result<(), String> {
         .map_err(|error| format!("无法使用系统默认应用打开文件: {error}"))
 }
 
+const PROJECT_GITHUB_URL: &str = "https://github.com/AngleNaris/shadowencoder";
+const PROJECT_GITHUB_URL_NORMALIZED: &str = "https://github.com/anglenaris/shadowencoder";
+const LATEST_RELEASE_API_URL: &str =
+    "https://api.github.com/repos/AngleNaris/shadowencoder/releases/latest";
+
+fn is_allowed_project_url(url: &str) -> bool {
+    let normalized = url.to_ascii_lowercase();
+    normalized == PROJECT_GITHUB_URL_NORMALIZED
+        || normalized == format!("{PROJECT_GITHUB_URL_NORMALIZED}/")
+        || normalized.starts_with(&format!("{PROJECT_GITHUB_URL_NORMALIZED}/releases/"))
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !is_allowed_project_url(&url) {
+        return Err("只能打开 ShadowEncoder 官方 GitHub 仓库或 Release 地址".into());
+    }
+    #[cfg(target_os = "windows")]
+    let mut command = media_command("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+    command
+        .arg(&url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法使用系统浏览器打开地址: {error}"))
+}
+
 #[tauri::command]
 fn open_output_directory(path: String) -> Result<(), String> {
     let input = PathBuf::from(&path);
@@ -4013,12 +4512,26 @@ async fn screenshot(
     time_sec: f32,
     width: i32,
     height: i32,
+    image_format: String,
+    quality: i32,
+    png_compression: i32,
     crop: Option<(i32, i32, i32, i32)>,
     output_options: Option<OutputOptions>,
     window: tauri::Window,
 ) -> Result<String, String> {
     run_blocking(move || {
-        screenshot_blocking(input, time_sec, width, height, crop, output_options, window)
+        screenshot_blocking(
+            input,
+            time_sec,
+            width,
+            height,
+            image_format,
+            quality,
+            png_compression,
+            crop,
+            output_options,
+            window,
+        )
     })
     .await
 }
@@ -4085,6 +4598,40 @@ async fn export_webp(
 }
 
 #[tauri::command]
+async fn export_image_sequence(
+    input: String,
+    start: f32,
+    duration: f32,
+    fps: f32,
+    width: i32,
+    height: i32,
+    image_format: String,
+    quality: i32,
+    png_compression: i32,
+    crop: Option<(i32, i32, i32, i32)>,
+    output_options: Option<OutputOptions>,
+    window: tauri::Window,
+) -> Result<String, String> {
+    run_blocking(move || {
+        export_image_sequence_blocking(
+            input,
+            start,
+            duration,
+            fps,
+            width,
+            height,
+            image_format,
+            quality,
+            png_compression,
+            crop,
+            output_options,
+            window,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
 async fn export_segment(
     input: String,
     start: f32,
@@ -4138,21 +4685,28 @@ async fn transcode(
     speed_preset: String,
     tune: String,
     style: i32,
+    video_level: String,
     pixel_format: String,
     container: String,
+    scale_mode: String,
+    scale_edge: i32,
     scale_w: i32,
     scale_h: i32,
     fps: f32,
     video_bitrate: i32,
+    maxrate: i32,
+    bufsize: i32,
     audio_codec: String,
     audio_profile: String,
     audio_bitrate: i32,
     audio_sample_rate: i32,
     audio_channels: i32,
-    unsharp: i32,
-    denoise: i32,
+    unsharp: f64,
+    denoise: f64,
+    deblock: f64,
     loudnorm: bool,
     audio_only: bool,
+    no_audio: bool,
     keep_res: bool,
     rate_mode: String,
     target_file_size_mb: f64,
@@ -4169,12 +4723,17 @@ async fn transcode(
             speed_preset,
             tune,
             style,
+            video_level,
             pixel_format,
             container,
+            scale_mode,
+            scale_edge,
             scale_w,
             scale_h,
             fps,
             video_bitrate,
+            maxrate,
+            bufsize,
             audio_codec,
             audio_profile,
             audio_bitrate,
@@ -4182,8 +4741,10 @@ async fn transcode(
             audio_channels,
             unsharp,
             denoise,
+            deblock,
             loudnorm,
             audio_only,
+            no_audio,
             keep_res,
             rate_mode,
             target_file_size_mb,
@@ -4293,19 +4854,132 @@ async fn preview_frame(path: String, time_sec: f32, max_width: i32) -> Result<Ve
     run_blocking(move || preview_frame_blocking(path, time_sec, max_width)).await
 }
 
-#[tauri::command]
-fn update_check() -> Result<Value, String> {
-    // 占位：返回当前版本，真实检查逻辑（CDN 拉取 manifest + SHA256 校验）为后续精修项
+fn parse_release_version(tag: &str) -> Result<semver::Version, String> {
+    let trimmed = tag.trim();
+    let normalized = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    semver::Version::parse(normalized)
+        .map_err(|error| format!("GitHub Release 版本号无效 ({tag}): {error}"))
+}
+
+fn update_check_blocking() -> Result<Value, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(Duration::from_secs(12))
+        .build();
+    let release: Value = agent
+        .get(LATEST_RELEASE_API_URL)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", "ShadowEncoder-Update-Check")
+        .call()
+        .map_err(|error| format!("无法检查 GitHub Release: {error}"))?
+        .into_json()
+        .map_err(|error| format!("无法解析 GitHub Release: {error}"))?;
+    let tag = release
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "GitHub Release 缺少 tag_name".to_string())?;
+    let latest = parse_release_version(tag)?;
+    let current = parse_release_version(env!("CARGO_PKG_VERSION"))?;
+    let release_url = release
+        .get("html_url")
+        .and_then(Value::as_str)
+        .filter(|url| is_allowed_project_url(url))
+        .unwrap_or(PROJECT_GITHUB_URL);
+
     Ok(serde_json::json!({
-        "current_version": env!("CARGO_PKG_VERSION"),
-        "update_available": false,
-        "notes": "更新检查待接入 CDN",
+        "current_version": current.to_string(),
+        "latest_version": latest.to_string(),
+        "update_available": latest > current,
+        "notes": release.get("body").and_then(Value::as_str).unwrap_or(""),
+        "release_url": release_url,
     }))
+}
+
+#[tauri::command]
+async fn update_check() -> Result<Value, String> {
+    run_blocking(update_check_blocking).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_filter_supports_dimensions_and_orientation_aware_edges() {
+        assert_eq!(
+            build_scale_filter("dimensions", 0, 1920, 1080, false).as_deref(),
+            Some("scale=1920:1080")
+        );
+        assert_eq!(
+            build_scale_filter("longEdge", 1000, 0, 0, false).as_deref(),
+            Some("scale=if(gte(iw\\,ih)\\,1000\\,-2):if(gte(iw\\,ih)\\,-2\\,1000)")
+        );
+        assert_eq!(
+            build_scale_filter("shortEdge", 1000, 0, 0, false).as_deref(),
+            Some("scale=if(lte(iw\\,ih)\\,1000\\,-2):if(lte(iw\\,ih)\\,-2\\,1000)")
+        );
+        assert_eq!(build_scale_filter("original", 0, 0, 0, true), None);
+    }
+
+    #[test]
+    fn still_image_encoding_args_apply_quality_and_png_compression() {
+        assert_eq!(still_image_format("jpeg").unwrap(), ("jpg", "mjpeg"));
+        assert_eq!(still_image_format("PNG").unwrap(), ("png", "png"));
+        assert!(still_image_format("gif").is_err());
+
+        let mut jpeg = Vec::new();
+        append_still_image_encoding_args(&mut jpeg, "jpg", 100, 6);
+        assert_eq!(jpeg, vec!["-q:v", "2"]);
+
+        let mut webp = Vec::new();
+        append_still_image_encoding_args(&mut webp, "webp", 82, 6);
+        assert_eq!(webp, vec!["-quality", "82"]);
+
+        let mut png = Vec::new();
+        append_still_image_encoding_args(&mut png, "png", 90, 12);
+        assert_eq!(png, vec!["-compression_level", "9"]);
+    }
+
+    #[test]
+    fn release_versions_accept_v_prefix_and_compare_semantically() {
+        assert_eq!(
+            parse_release_version("v2.2.0").unwrap().to_string(),
+            "2.2.0"
+        );
+        assert!(parse_release_version("2.10.0").unwrap() > parse_release_version("2.9.9").unwrap());
+        assert!(parse_release_version("latest").is_err());
+    }
+
+    #[test]
+    fn browser_url_is_restricted_to_project_releases() {
+        assert!(is_allowed_project_url(PROJECT_GITHUB_URL));
+        assert!(is_allowed_project_url(
+            "https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.0"
+        ));
+        assert!(!is_allowed_project_url("https://github.com/other/project"));
+        assert!(!is_allowed_project_url(
+            "https://github.com/AngleNaris/shadowencoder.evil.example/releases/tag/v2.2.0"
+        ));
+    }
+
+    #[test]
+    fn audio_arguments_keep_copy_filter_free_and_encode_loudness_when_requested() {
+        let mut copied = Vec::new();
+        append_audio_args(&mut copied, "copy", "", 0, 0, 0, true);
+        assert_eq!(copied, vec!["-c:a", "copy"]);
+
+        let mut encoded = Vec::new();
+        append_audio_args(&mut encoded, "aac", "he-aac", 192, 48_000, 2, true);
+        assert!(encoded
+            .windows(2)
+            .any(|pair| pair == ["-profile:a", "aac_he"]));
+        assert!(encoded
+            .windows(2)
+            .any(|pair| pair == ["-af", "loudnorm=I=-9:TP=0:LRA=7"]));
+    }
 
     fn dit_test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -4316,6 +4990,64 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos()
         ))
+    }
+
+    fn test_output_options(mode: &str, directory: &Path, name_template: &str) -> OutputOptions {
+        OutputOptions {
+            mode: mode.to_string(),
+            name_template: name_template.to_string(),
+            subdirectory: String::new(),
+            directory: directory.to_string_lossy().to_string(),
+            preset_name: String::new(),
+            resolution: String::new(),
+            fps_label: String::new(),
+            codec_label: String::new(),
+            bitrate_label: String::new(),
+            unique_name: false,
+        }
+    }
+
+    #[test]
+    fn fixed_rename_uses_the_selected_directory_and_filename_template() {
+        let root = dit_test_root("fixed-rename-output");
+        let output_root = root.join("exports");
+        let input = root.join("source clip.mov");
+        let options = test_output_options("fixedRename", &output_root, "{name}_review{suffix}");
+
+        let output =
+            resolve_output_path(&input.to_string_lossy(), Some(&options), "_se", "mp4").unwrap();
+
+        assert_eq!(output, output_root.join("sourceclip_review_se.mp4"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transcode_without_a_preset_uses_a_unique_plain_filename() {
+        let root = dit_test_root("transcode-plain-output");
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("sourceclip.mp4");
+        std::fs::write(&input, b"source").unwrap();
+        let mut options = test_output_options("source", &root, "");
+        options.unique_name = true;
+
+        let output =
+            resolve_output_path(&input.to_string_lossy(), Some(&options), "", "mp4").unwrap();
+
+        assert_eq!(output, root.join("sourceclip_2.mp4"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sequence_directories_never_reuse_an_existing_material_folder() {
+        let root = dit_test_root("sequence-directory");
+        let first = root.join("clip.v1_frames");
+        std::fs::create_dir_all(&first).unwrap();
+
+        assert_eq!(
+            unique_output_directory(first).unwrap(),
+            root.join("clip.v1_frames_2")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn dit_temp_files(path: &Path) -> Vec<PathBuf> {
@@ -4463,6 +5195,49 @@ mod tests {
             Some(6),
             false
         ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn media_queues_skip_unsupported_files_before_counting() {
+        let root = dit_test_root("media-queue-filter");
+        std::fs::create_dir_all(&root).unwrap();
+        let movie = root.join("clip.MOV");
+        let audio = root.join("sound.WAV");
+        let log = root.join("camera.log");
+        let xml = root.join("metadata.xml");
+        std::fs::write(&movie, b"movie").unwrap();
+        std::fs::write(&audio, b"audio").unwrap();
+        std::fs::write(&log, b"log").unwrap();
+        std::fs::write(&xml, b"xml").unwrap();
+
+        let transcode = expand_inputs(
+            &[root.to_string_lossy().to_string()],
+            false,
+            InputMediaKind::AudioVisual,
+        );
+        assert_eq!(transcode.files.len(), 2);
+        assert!(transcode
+            .files
+            .contains(&movie.to_string_lossy().to_string()));
+        assert!(transcode
+            .files
+            .contains(&audio.to_string_lossy().to_string()));
+        assert_eq!(transcode.skipped, 2);
+
+        let video = expand_inputs(
+            &[
+                movie.to_string_lossy().to_string(),
+                audio.to_string_lossy().to_string(),
+                log.to_string_lossy().to_string(),
+                xml.to_string_lossy().to_string(),
+            ],
+            false,
+            InputMediaKind::Video,
+        );
+        assert_eq!(video.files, vec![movie.to_string_lossy().to_string()]);
+        assert_eq!(video.skipped, 3);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4715,6 +5490,24 @@ mod tests {
     }
 
     #[test]
+    fn encoder_rate_control_uses_codec_specific_quality_flags() {
+        let mut nvenc = Vec::new();
+        append_video_rate_control(&mut nvenc, "hevc_nvenc", "crf", 21, 0, 0, 0);
+        assert_eq!(nvenc, ["-cq", "21", "-b:v", "0"]);
+        assert!(!nvenc.iter().any(|value| value == "2000k"));
+
+        let mut qsv = Vec::new();
+        append_video_rate_control(&mut qsv, "hevc_qsv", "crf", 24, 0, 0, 0);
+        assert_eq!(qsv, ["-global_quality", "24"]);
+
+        let mut prores = Vec::new();
+        append_video_rate_control(&mut prores, "prores", "crf", 23, 0, 0, 0);
+        assert!(prores.is_empty());
+        append_video_profile(&mut prores, "prores", "4444");
+        assert_eq!(prores, ["-profile:v", "4"]);
+    }
+
+    #[test]
     fn ffmpeg_error_summary_prefers_the_actionable_diagnostic() {
         let lines = VecDeque::from([
             "[mp4 @ 0001] Could not find tag for codec pcm_s24le".to_string(),
@@ -4906,6 +5699,7 @@ fn main() {
             screenshot,
             export_gif,
             export_webp,
+            export_image_sequence,
             export_segment,
             transcode,
             mix,
@@ -4920,6 +5714,7 @@ fn main() {
             read_media_file,
             preview_frame,
             open_path,
+            open_url,
             open_output_directory,
             update_check,
             cancel_ffmpeg,
@@ -4931,6 +5726,7 @@ fn main() {
             mpv_player::player_pause,
             mpv_player::player_toggle,
             mpv_player::player_seek,
+            mpv_player::player_step,
             mpv_player::player_set_volume,
             mpv_player::player_status,
             mpv_player::player_frame,

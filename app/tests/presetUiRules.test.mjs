@@ -20,7 +20,7 @@ test('检测和透明通道只在前置选择生效时启用数字输入', () =>
 });
 
 test('比例、固定时长和截取帧率沿用主界面的显示与禁用逻辑', () => {
-  for (const type of ['screenshot', 'segment', 'gif', 'webp']) {
+  for (const type of ['screenshot', 'segment', 'gif', 'webp', 'sequence']) {
     assert.equal(isPresetUiFieldVisible(type, 'customRatio', { aspect: 'custom' }), true);
     assert.equal(isPresetUiFieldVisible(type, 'customRatio', { aspect: '16:9' }), false);
     assert.equal(isPresetUiFieldDisabled(type, 'w', { aspect: 'free' }), true);
@@ -31,4 +31,15 @@ test('比例、固定时长和截取帧率沿用主界面的显示与禁用逻�
   assert.equal(isPresetUiFieldVisible('gif', 'fps', {}), true);
   assert.equal(isPresetUiFieldDisabled('segment', 'fixedVal', { fixedDur: false }), true);
   assert.equal(isPresetUiFieldDisabled('webp', 'fixedVal', { fixedDur: true }), false);
+  assert.equal(isPresetUiFieldDisabled('sequence', 'fixedVal', { fixedDur: false }), true);
+  assert.equal(isPresetUiFieldDisabled('sequence', 'fixedVal', { fixedDur: true }), false);
+  assert.equal(isPresetUiFieldDisabled('sequence', 'fixedVal', { fixedDur: true, fullDuration: true }), true);
+  assert.equal(isPresetUiFieldVisible('sequence', 'quality', { imageFormat: 'jpg' }), true);
+  assert.equal(isPresetUiFieldVisible('sequence', 'quality', { imageFormat: 'webp' }), true);
+  assert.equal(isPresetUiFieldVisible('sequence', 'quality', { imageFormat: 'png' }), false);
+  assert.equal(isPresetUiFieldVisible('sequence', 'quality', { imageFormat: 'tiff' }), false);
+  assert.equal(isPresetUiFieldVisible('sequence', 'pngCompression', { imageFormat: 'png' }), true);
+  assert.equal(isPresetUiFieldVisible('sequence', 'pngCompression', { imageFormat: 'jpg' }), false);
+  assert.equal(isPresetUiFieldVisible('screenshot', 'quality', { imageFormat: 'webp' }), true);
+  assert.equal(isPresetUiFieldVisible('screenshot', 'pngCompression', { imageFormat: 'png' }), true);
 });

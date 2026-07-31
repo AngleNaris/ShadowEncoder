@@ -5,11 +5,12 @@ export type SharedPresetUiType =
   | 'screenshot'
   | 'segment'
   | 'gif'
-  | 'webp';
+  | 'webp'
+  | 'sequence';
 
 type FieldState = Record<string, unknown>;
 
-const RATIO_TYPES = new Set<SharedPresetUiType>(['screenshot', 'segment', 'gif', 'webp']);
+const RATIO_TYPES = new Set<SharedPresetUiType>(['screenshot', 'segment', 'gif', 'webp', 'sequence']);
 
 export function isPresetUiFieldVisible(
   type: SharedPresetUiType,
@@ -18,6 +19,12 @@ export function isPresetUiFieldVisible(
 ): boolean {
   if (RATIO_TYPES.has(type) && key === 'customRatio') {
     return state.aspect === 'custom';
+  }
+  if ((type === 'screenshot' || type === 'sequence') && key === 'quality') {
+    return state.imageFormat === 'jpg' || state.imageFormat === 'webp';
+  }
+  if ((type === 'screenshot' || type === 'sequence') && key === 'pngCompression') {
+    return state.imageFormat === 'png';
   }
   if (type === 'segment' && key === 'fps') {
     return false;
@@ -45,8 +52,8 @@ export function isPresetUiFieldDisabled(
   if (RATIO_TYPES.has(type) && (key === 'w' || key === 'h')) {
     return state.aspect === 'free' || state.aspect === 'match';
   }
-  if ((type === 'segment' || type === 'gif' || type === 'webp') && key === 'fixedVal') {
-    return state.fixedDur !== true;
+  if ((type === 'segment' || type === 'gif' || type === 'webp' || type === 'sequence') && key === 'fixedVal') {
+    return state.fixedDur !== true || (type === 'sequence' && state.fullDuration === true);
   }
   return false;
 }

@@ -113,8 +113,9 @@ test('所有输入型控件共用单层焦点描边', async () => {
     readFile(new URL('../src/lib/muiTheme.ts', import.meta.url), 'utf8'),
   ]);
 
-  assert.match(theme, /--ctrl-focus-border:\s*#6d5da5;/);
-  assert.match(theme, /--ctrl-focus-shadow:\s*0 0 12px -2px rgba\(109, 93, 165, 0\.4\);/);
+  assert.match(theme, /--primary:\s*var\(--accent-primary, #6d5da5\);/);
+  assert.match(theme, /--ctrl-focus-border:\s*var\(--primary\);/);
+  assert.match(theme, /--ctrl-focus-shadow:\s*0 0 12px -2px rgba\(var\(--primary-rgb\), 0\.4\);/);
   assert.doesNotMatch(theme, /--ctrl-focus-shadow:[^;]*(?:inset\s+)?0 0 0 1px/);
   assert.match(theme, /input:focus, select:focus, textarea:focus\s*\{[\s\S]*box-shadow:\s*var\(--ctrl-focus-shadow\)/);
   assert.match(theme, /\.se-num input:hover:not\(:disabled\):not\(:focus\)/);
