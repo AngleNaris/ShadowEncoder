@@ -555,10 +555,17 @@ export function PresetManageDialog({
   useModalLayerRegistration(!closing);
   const fileRef = useRef<HTMLInputElement>(null);
   const [importErr, setImportErr] = useState<string | null>(null);
+  const dragIndexRef = useRef<number | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
 
+  const clearDragState = () => {
+    dragIndexRef.current = null;
+    setDragIndex(null);
+    setOverIndex(null);
+  };
   const onDragStart = (i: number) => (e: React.DragEvent) => {
+    dragIndexRef.current = i;
     setDragIndex(i);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', String(i));
@@ -570,11 +577,12 @@ export function PresetManageDialog({
   };
   const onDrop = (i: number) => (e: React.DragEvent) => {
     e.preventDefault();
-    if (dragIndex !== null && dragIndex !== i) onReorder(dragIndex, i);
-    setDragIndex(null);
-    setOverIndex(null);
+    const transferredIndex = Number.parseInt(e.dataTransfer.getData('text/plain'), 10);
+    const from = dragIndexRef.current ?? (Number.isInteger(transferredIndex) ? transferredIndex : null);
+    if (from !== null && from !== i) onReorder(from, i);
+    clearDragState();
   };
-  const onDragEnd = () => { setDragIndex(null); setOverIndex(null); };
+  const onDragEnd = clearDragState;
 
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];

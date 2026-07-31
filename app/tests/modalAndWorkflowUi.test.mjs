@@ -51,6 +51,23 @@ test('预设弹窗会遮挡原生播放器 surface', async () => {
   assert.match(playerSource, /!mpvActive \|\| mpvRenderer !== 'gpu' \|\| !ready \|\| modalLayerOpen/);
 });
 
+test('原生播放器画面从播放器边框内侧开始定位', async () => {
+  const source = await readFile(new URL('../src/components/VideoPlayer.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /x:\s*stageRect\.left \+ stage\.clientLeft \+ bounds\.x/);
+  assert.match(source, /y:\s*stageRect\.top \+ stage\.clientTop \+ bounds\.y/);
+});
+
+test('预设拖拽在 WebView 原生拖放循环中同步保留源索引', async () => {
+  const source = await readFile(new URL('../src/components/presetSystem.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /const dragIndexRef = useRef<number \| null>\(null\)/);
+  assert.match(source, /dragIndexRef\.current = i;\s*setDragIndex\(i\)/);
+  assert.match(source, /e\.dataTransfer\.getData\('text\/plain'\)/);
+  assert.match(source, /const from = dragIndexRef\.current \?\?/);
+  assert.match(source, /dragIndexRef\.current = null;/);
+});
+
 test('全部弹窗注册共享模态层且播放器保留帧与弹窗同速淡出', async () => {
   const [appSource, pickerSource, tabsSource, playerSource, theme] = await Promise.all([
     readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),

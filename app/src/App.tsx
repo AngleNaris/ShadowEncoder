@@ -86,7 +86,7 @@ const AGENT_TASK_LABEL: Record<AgentTaskSnapshot['function'], string> = {
   workflow: '流程',
 };
 
-const APP_VERSION = "2.2.1";
+const APP_VERSION = "2.2.2";
 const PROJECT_GITHUB_URL = "https://github.com/AngleNaris/shadowencoder";
 
 const THEME_ACCENT_OPTIONS = [

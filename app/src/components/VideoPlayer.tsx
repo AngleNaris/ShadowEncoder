@@ -1182,8 +1182,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
         }
         : undefined;
       void queueSurfaceUpdate({
-        x: stageRect.left + bounds.x,
-        y: stageRect.top + bounds.y,
+        x: stageRect.left + stage.clientLeft + bounds.x,
+        y: stageRect.top + stage.clientTop + bounds.y,
         width: bounds.w,
         height: bounds.h,
         visible: true,

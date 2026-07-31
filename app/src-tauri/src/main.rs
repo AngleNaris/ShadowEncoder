@@ -2512,6 +2512,37 @@ struct CheckSummary {
     fail: i32,
 }
 
+fn expected_video_codec_name(encoder: &str) -> Option<&str> {
+    let encoder = encoder.trim();
+    match encoder {
+        "" | "copy" => None,
+        "libx264" | "h264_nvenc" | "h264_amf" | "h264_qsv" => Some("h264"),
+        "libx265" | "hevc_nvenc" | "hevc_amf" | "hevc_qsv" => Some("hevc"),
+        "libsvtav1" | "libaom-av1" | "av1_nvenc" | "av1_amf" | "av1_qsv" => Some("av1"),
+        "libvpx" => Some("vp8"),
+        "libvpx-vp9" => Some("vp9"),
+        "prores" | "prores_ks" => Some("prores"),
+        _ => Some(encoder),
+    }
+}
+
+fn video_codec_label(codec: &str) -> &str {
+    match codec {
+        "h264" => "H.264",
+        "hevc" => "H.265/HEVC",
+        "av1" => "AV1",
+        "vp8" => "VP8",
+        "vp9" => "VP9",
+        "mpeg4" => "MPEG-4 Part 2",
+        "mpeg2video" => "MPEG-2",
+        "prores" => "ProRes",
+        "dnxhd" => "DNxHR",
+        "ffv1" => "FFV1",
+        "mjpeg" => "MJPEG",
+        _ => codec,
+    }
+}
+
 fn check_blocking(
     paths: Vec<String>,
     fps_tolerance: f32,
@@ -2528,6 +2559,7 @@ fn check_blocking(
         pass_with_warnings: 0,
         fail: 0,
     };
+    let expected_codec_name = expected_video_codec_name(&expected_codec);
     let expanded = expand_inputs(&paths, recursive, InputMediaKind::Video);
     if expanded.skipped > 0 {
         emit_log(
@@ -2672,9 +2704,13 @@ fn check_blocking(
                 warns.push(format!("帧率不符 期望 {:.3} 实际 {:.3}", expected_fps, fps));
             }
         }
-        if !expected_codec.is_empty() {
-            if codec != expected_codec {
-                warns.push(format!("编码器不符 期望 {} 实际 {}", expected_codec, codec));
+        if let Some(expected_codec_name) = expected_codec_name {
+            if !codec.eq_ignore_ascii_case(expected_codec_name) {
+                warns.push(format!(
+                    "编码格式不符 期望 {} 实际 {}",
+                    video_codec_label(expected_codec_name),
+                    video_codec_label(&codec)
+                ));
             }
         }
         // 标准帧率偏离（仅在未指定期望帧率时检查）
@@ -5449,6 +5485,20 @@ mod tests {
             }]
         });
         assert_eq!(display_dimensions_from_probe(&probe), Some((720, 1280)));
+    }
+
+    #[test]
+    fn check_codec_comparison_uses_stream_format_instead_of_encoder_implementation() {
+        assert_eq!(expected_video_codec_name("libx264"), Some("h264"));
+        assert_eq!(expected_video_codec_name("h264_nvenc"), Some("h264"));
+        assert_eq!(expected_video_codec_name("libx265"), Some("hevc"));
+        assert_eq!(expected_video_codec_name("hevc_qsv"), Some("hevc"));
+        assert_eq!(expected_video_codec_name("libsvtav1"), Some("av1"));
+        assert_eq!(expected_video_codec_name("libvpx-vp9"), Some("vp9"));
+        assert_eq!(expected_video_codec_name("prores"), Some("prores"));
+        assert_eq!(expected_video_codec_name("copy"), None);
+        assert_eq!(video_codec_label("h264"), "H.264");
+        assert_ne!(expected_video_codec_name("hevc_nvenc"), Some("h264"));
     }
 
     #[test]

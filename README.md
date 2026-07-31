@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.1"><strong>下载 v2.2.1</strong></a>
+  <a href="https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.2"><strong>下载 v2.2.2</strong></a>
   &nbsp;·&nbsp;
   <a href="./docs/agent-cli-design.md">Agent CLI</a>
   &nbsp;·&nbsp;
@@ -90,9 +90,9 @@ shadowencoder-cli help
 
 | 文件 | 适合谁 |
 | --- | --- |
-| `ShadowEncoder_2.2.1_x64-portable.exe` | 单文件便携版，图省事的话选它——ShadowEncoder、Gifski、FFmpeg、FFprobe、libmpv 和 CLI 全打包在里面了 |
-| `ShadowEncoder_2.2.1_x64-setup.exe` | 常规的 Windows 安装程序 |
-| `ShadowEncoder_2.2.1_x64_en-US.msi` | 走 Windows Installer 部署时用 |
+| `ShadowEncoder_2.2.2_x64-portable.exe` | 单文件便携版，图省事的话选它——ShadowEncoder、Gifski、FFmpeg、FFprobe、libmpv 和 CLI 全打包在里面了 |
+| `ShadowEncoder_2.2.2_x64-setup.exe` | 常规的 Windows 安装程序 |
+| `ShadowEncoder_2.2.2_x64_en-US.msi` | 走 Windows Installer 部署时用 |
 
 便携版启动时会把运行时静默解到临时目录，程序退出后自动清理，不会在系统里留下一堆东西。WebView2 用的是 Windows 10/11 自带的系统运行时（Tauri 需要它）。
 

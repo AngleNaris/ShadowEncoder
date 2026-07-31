@@ -60,3 +60,19 @@ test('序列化只写入当前版本且不生成预设', () => {
   assert.equal(serialized.version, PRESET_STORAGE_VERSION);
   assert.deepEqual(serialized.presets, emptyPresetStore());
 });
+
+test('序列化与重新加载保持用户调整后的预设顺序', () => {
+  const store = emptyPresetStore();
+  store.encode = ['second', 'third', 'first'].map((id) => ({
+    id,
+    name: id,
+    type: 'encode',
+    params: {},
+  }));
+
+  const restored = loadPresetStore(storageWith([[
+    PRESET_STORAGE_KEY,
+    serializePresetStore(store),
+  ]]));
+  assert.deepEqual(restored.encode.map((preset) => preset.id), ['second', 'third', 'first']);
+});
