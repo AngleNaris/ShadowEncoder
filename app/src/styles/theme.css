@@ -618,9 +618,6 @@ button.se-rail-brand:active:not(:disabled) {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 6px 0;
-  /* 与参数列一致：滚动条出现时吃掉右侧 4px，左侧补回同宽，导航项始终与底部按钮对齐居中 */
-  padding-left: var(--se-scrollbar-width, 0px);
-  transition: padding-left var(--transition);
 }
 .se-rail-group { padding: 4px 0 6px; }
 .se-rail-group + .se-rail-group { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 10px; }
@@ -633,7 +630,9 @@ button.se-rail-brand:active:not(:disabled) {
   user-select: none;
 }
 .se-rail-item {
-  width: 100%;
+  /* 滚动条吃掉右侧 4px 时补回同宽：高亮铺满整条导航轨，紧贴左右边缘，
+     内容与底部按钮保持对齐居中；无滚动条时该变量为 0，宽度即 100% */
+  width: calc(100% + var(--se-scrollbar-width, 0px));
   min-height: 52px;
   padding: 7px 2px 5px;
   background-color: transparent;

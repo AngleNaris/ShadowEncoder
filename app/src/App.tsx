@@ -6,6 +6,7 @@ import { MediaPickerDialog } from "./components/MediaPickerDialog";
 import * as ui from "./components/ui";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { updateCheck, openPath, openUrl } from "./lib/ffmpeg";
 import { FileListProvider, useFileList } from "./lib/fileListContext";
 import { isAudioVisualPath, isVideoPath } from "./lib/mediaExtensions";
@@ -86,7 +87,8 @@ const AGENT_TASK_LABEL: Record<AgentTaskSnapshot['function'], string> = {
   workflow: '流程',
 };
 
-const APP_VERSION = "2.2.2";
+// Tauri 运行时会用 getVersion() 读取真实版本号；此处仅作浏览器直开 Vite 时的回退值
+const FALLBACK_APP_VERSION = "2.2.4";
 const PROJECT_GITHUB_URL = "https://github.com/AngleNaris/shadowencoder";
 
 const THEME_ACCENT_OPTIONS = [
@@ -115,7 +117,7 @@ function BrandRayField() {
   );
 }
 
-function UpdateDialog({ onClose }: { onClose: () => void }) {
+function UpdateDialog({ onClose, version }: { onClose: () => void; version: string }) {
   useModalLayerRegistration();
   const [info, setInfo] = useState<UpdateCheckInfo | null>(null);
   const [checking, setChecking] = useState(false);
@@ -143,7 +145,7 @@ function UpdateDialog({ onClose }: { onClose: () => void }) {
   const statusDetail = checking ? "正在连接更新服务，请稍候"
     : info?.error ? "请稍后重新检查"
     : info?.update_available ? "可以前往项目仓库查看最新发布" : "当前安装版本无需更新";
-  const displayedVersion = (info?.update_available ? info.latest_version : info?.current_version) || APP_VERSION;
+  const displayedVersion = (info?.update_available ? info.latest_version : info?.current_version) || version;
   const repositoryUrl = info?.release_url || PROJECT_GITHUB_URL;
 
   return (
@@ -163,7 +165,7 @@ function UpdateDialog({ onClose }: { onClose: () => void }) {
             </span>
             <div className="se-update-identity-copy">
               <strong>ShadowEncoder</strong>
-              <span>版本 v{APP_VERSION}</span>
+              <span>版本 v{version}</span>
             </div>
           </div>
 
@@ -390,6 +392,7 @@ function AppShell() {
   const renderedTab = useDeferredValue(tab);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const {
@@ -416,8 +419,9 @@ function AppShell() {
   const lastAgentProgressRef = useRef({ taskId: '', progress: 0 });
   const railNavRef = useRef<HTMLDivElement | null>(null);
 
-  // 与参数列同一套滚动条测量：滚动条宽度写入 --se-scrollbar-width，
-  // 滚动条吃掉右侧 4px 时左侧补回同宽，导航项保持与底部按钮对齐居中
+  // 滚动条出现在导航轨右侧时，条目内容盒会被吃掉 4px；
+  // 把滚动条宽度写入 --se-scrollbar-width，条目宽度补回同宽，使 hover/active
+  // 高亮铺满整条导航轨并紧贴左右边缘，内容与底部按钮保持对齐居中
   useLayoutEffect(() => {
     const element = railNavRef.current;
     if (!element) return;
@@ -439,6 +443,9 @@ function AppShell() {
       if (frame) cancelAnimationFrame(frame);
     };
   }, []);
+
+  // 版本号由 Tauri 运行时提供（与 tauri.conf.json / Cargo.toml 一致），
+  // 避免发布新版本后 UI 上残留旧版号；浏览器直开 Vite 时保留回退值
 
   taskRef.current = task;
 
@@ -463,12 +470,18 @@ function AppShell() {
   }, []);
 
   useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {
+      // 浏览器直开 Vite 时无 Tauri 运行时，保留回退版本号
+    });
+  }, []);
+
+  useEffect(() => {
     try {
-      getCurrentWindow().setTitle(`ShadowEncoder v${APP_VERSION}`);
+      getCurrentWindow().setTitle(`ShadowEncoder v${appVersion}`);
     } catch {
       // 浏览器直开 Vite 时无 Tauri 运行时，忽略
     }
-  }, []);
+  }, [appVersion]);
 
   useEffect(() => {
     let disposed = false;
@@ -704,7 +717,7 @@ function AppShell() {
             <IconUpdate size={18} />
             <span className="se-rail-label">更新</span>
           </button>
-          <span className="se-rail-version">v{APP_VERSION}</span>
+          <span className="se-rail-version">v{appVersion}</span>
         </div>
       </nav>
 
@@ -750,7 +763,7 @@ function AppShell() {
             onClose={closeSettings}
           />
         )}
-        {updateOpen && <UpdateDialog onClose={() => setUpdateOpen(false)} />}
+        {updateOpen && <UpdateDialog onClose={() => setUpdateOpen(false)} version={appVersion} />}
       </div>
 
     </div>
