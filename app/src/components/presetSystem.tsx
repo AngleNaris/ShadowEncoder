@@ -12,6 +12,7 @@ import React, {
   type ReactNode,
 } from 'react';
 import * as ui from './ui';
+import { invoke } from '@tauri-apps/api/core';
 import { IconClose, IconCheckShield, IconPlus, IconExport, IconImport, IconTrash, IconCopy, IconSettings } from './icons';
 import { useModalLayerRegistration } from '../lib/modalLayer';
 import {
@@ -412,8 +413,13 @@ export function usePresets(type: PresetType) {
       revision: 1,
     }))),
   ]);
-  const exportAll = () => {
+  const exportAll = async () => {
     const data = JSON.stringify({ type, presets }, null, 2);
+    if (isTauriRuntime()) {
+      // WebView2 会拦截 HTML5 `<a download>`，导出必须走原生保存对话框
+      await invoke('export_presets', { type, data });
+      return;
+    }
     const blob = new Blob([data], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

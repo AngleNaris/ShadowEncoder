@@ -4895,6 +4895,26 @@ async fn probe_path(path: String) -> Result<PathProbe, String> {
     run_blocking(move || Ok(probe_path_blocking(&path))).await
 }
 
+/// 预设导出：rfd 保存对话框选择位置后写入 JSON 文件；用户取消返回 null。
+/// （WebView2 会拦截 HTML5 `<a download>`，保存文件必须走原生对话框。）
+fn export_presets_blocking(type_: String, data: String) -> Result<Option<String>, String> {
+    let path = rfd::FileDialog::new()
+        .set_title("导出预设")
+        .set_file_name(format!("{type_}-presets.json"))
+        .add_filter("JSON", &["json"])
+        .save_file();
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    std::fs::write(&path, data).map_err(|e| format!("写入预设文件失败: {e}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+async fn export_presets(type_: String, data: String) -> Result<Option<String>, String> {
+    run_blocking(move || export_presets_blocking(type_, data)).await
+}
+
 #[tauri::command]
 async fn list_storage_volumes() -> Result<Vec<StorageVolume>, String> {
     run_blocking(|| Ok(storage_volumes())).await
@@ -5785,6 +5805,7 @@ fn main() {
             list_media_directory,
             list_media_tree,
             probe_path,
+            export_presets,
             list_storage_volumes,
             get_storage_volume,
             read_media_file,
