@@ -653,7 +653,6 @@ export function PresetManageDialog({
         </div>
         <div className="se-dialog-foot">
           <div className="se-foot-actions">
-            <ui.Button icon={<IconClose size={14} />} onClick={onClose}>取消</ui.Button>
             <ui.Button primary disabled={!canSave} icon={<IconCheckShield size={14} />} onClick={onSave}>{saveLabel}</ui.Button>
           </div>
         </div>

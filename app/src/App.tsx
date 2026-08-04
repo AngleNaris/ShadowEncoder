@@ -1,5 +1,5 @@
 // ShadowEncoder 主框架 —— 左侧导航轨 + 三列工作区：共享素材 | 工具参数 | 结果
-import React, { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { EncodeTab, MixTab, CheckTab, AlphaTab, ScreenshotTab, ExportTab, TaskRunnerProvider, useTaskRunner } from "./components/tabs";
 import { DitBackupTab, DitWorkflowTab } from "./components/DitTabs";
 import { MediaPickerDialog } from "./components/MediaPickerDialog";
@@ -414,6 +414,31 @@ function AppShell() {
   const progressTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const progressWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastAgentProgressRef = useRef({ taskId: '', progress: 0 });
+  const railNavRef = useRef<HTMLDivElement | null>(null);
+
+  // 与参数列同一套滚动条测量：滚动条宽度写入 --se-scrollbar-width，
+  // 滚动条吃掉右侧 4px 时左侧补回同宽，导航项保持与底部按钮对齐居中
+  useLayoutEffect(() => {
+    const element = railNavRef.current;
+    if (!element) return;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const scrollbarWidth = Math.max(0, Math.min(12, element.offsetWidth - element.clientWidth));
+      element.style.setProperty('--se-scrollbar-width', `${scrollbarWidth}px`);
+    };
+    const schedule = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+    const resizeObserver = new ResizeObserver(schedule);
+    resizeObserver.observe(element);
+    measure();
+    return () => {
+      resizeObserver.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, []);
 
   taskRef.current = task;
 
@@ -652,7 +677,7 @@ function AppShell() {
             <img className="se-rail-brand-icon" src={appIcon} alt="" />
           </span>
         </button>
-        <div className="se-rail-nav">
+        <div className="se-rail-nav" ref={railNavRef}>
           {NAV_GROUPS.map((g) => (
             <div className="se-rail-group" key={g.label}>
               <div className="se-rail-group-label">{g.label}</div>

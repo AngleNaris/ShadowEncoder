@@ -10,6 +10,8 @@ import {
   IconPlus, IconSelectAll, IconTerminal, IconTrash, IconVideo,
 } from './icons';
 import type { TaskLogEvent, TaskLogTone } from '../lib/ffmpeg';
+import { isTauriRuntime, probePath } from '../lib/ffmpeg';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { FileListItem } from '../lib/fileListContext';
 import { isMediaPath } from '../lib/mediaExtensions';
 
@@ -1227,8 +1229,57 @@ export function FileList({
   disabled?: boolean;
 }) {
   const [drag, setDrag] = useState(false);
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  // Tauri 下 wry 在 OS 层拦截文件拖放，HTML5 drop 事件收不到；改用 webview 拖放事件驱动。
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    // 事件坐标为相对 webview 客户区的物理像素，需换算成 CSS 像素再做命中测试。
+    const hitTest = (position: { x: number; y: number }) => {
+      const rect = listRef.current?.getBoundingClientRect();
+      if (!rect) return false;
+      const x = position.x / window.devicePixelRatio;
+      const y = position.y / window.devicePixelRatio;
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    };
+    getCurrentWebview().onDragDropEvent((event) => {
+      if (disabled) return;
+      const payload = event.payload;
+      if (payload.type === 'enter' || payload.type === 'over') {
+        setDrag(hitTest(payload.position));
+      } else if (payload.type === 'leave') {
+        setDrag(false);
+      } else if (payload.type === 'drop') {
+        setDrag(false);
+        if (!hitTest(payload.position)) return;
+        // 目录路径不带尾部分隔符，探测后按列表约定补上（Windows 用 '\'）；探测失败按文件处理。
+        void Promise.all(payload.paths.map(async (raw) => {
+          if (raw.endsWith('/') || raw.endsWith('\\')) return raw;
+          try {
+            const probe = await probePath(raw);
+            return probe.exists && probe.is_directory ? `${raw}\\` : raw;
+          } catch {
+            return raw;
+          }
+        })).then((paths) => {
+          if (paths.length) onDrop(paths);
+        });
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [disabled, onDrop]);
+
   return (
     <div
+      ref={listRef}
       className={`se-filelist se-filelist-shared${drag ? ' drag' : ''}${disabled ? ' is-readonly' : ''}`}
       onDragOver={(e) => { if (!disabled) { e.preventDefault(); setDrag(true); } }}
       onDragLeave={() => setDrag(false)}

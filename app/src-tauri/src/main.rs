@@ -4870,6 +4870,31 @@ async fn list_media_tree(path: String) -> Result<MediaTreeListing, String> {
     run_blocking(move || list_media_tree_blocking(path)).await
 }
 
+#[derive(Serialize)]
+struct PathProbe {
+    exists: bool,
+    is_directory: bool,
+}
+
+fn probe_path_blocking(path: &str) -> PathProbe {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => PathProbe {
+            exists: true,
+            is_directory: metadata.is_dir(),
+        },
+        Err(_) => PathProbe {
+            exists: false,
+            is_directory: false,
+        },
+    }
+}
+
+/** 轻量探测路径是否存在及其目录类型（拖放路径归一化用，不递归扫描）。 */
+#[tauri::command]
+async fn probe_path(path: String) -> Result<PathProbe, String> {
+    run_blocking(move || Ok(probe_path_blocking(&path))).await
+}
+
 #[tauri::command]
 async fn list_storage_volumes() -> Result<Vec<StorageVolume>, String> {
     run_blocking(|| Ok(storage_volumes())).await
@@ -5759,6 +5784,7 @@ fn main() {
             pick_path,
             list_media_directory,
             list_media_tree,
+            probe_path,
             list_storage_volumes,
             get_storage_volume,
             read_media_file,

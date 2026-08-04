@@ -280,6 +280,16 @@ export function listMediaTree(path: string): Promise<MediaTreeListing> {
   return invoke<MediaTreeListing>('list_media_tree', { path });
 }
 
+export interface PathProbe {
+  exists: boolean;
+  is_directory: boolean;
+}
+
+/** 轻量探测路径是否存在及其目录类型（拖放路径归一化用，不递归扫描）。 */
+export function probePath(path: string): Promise<PathProbe> {
+  return invoke<PathProbe>('probe_path', { path });
+}
+
 /** 获取当前可访问卷的快照，流程启用后用快照差异检测新接入磁盘。 */
 export function listStorageVolumes(): Promise<StorageVolume[]> {
   return invoke<StorageVolume[]>('list_storage_volumes');

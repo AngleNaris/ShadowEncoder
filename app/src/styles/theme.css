@@ -480,7 +480,6 @@ select option { background: var(--surface-2); color: var(--text); }
   display: flex;
   flex-direction: column;
   min-height: 0;
-  z-index: 10;
 }
 .se-rail-brand {
   height: 69px;
@@ -614,7 +613,15 @@ button.se-rail-brand:active:not(:disabled) {
   0%, 9% { filter: blur(1.2px); }
   100% { filter: blur(var(--se-ray-haze-end)); }
 }
-.se-rail-nav { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 0; }
+.se-rail-nav {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px 0;
+  /* 与参数列一致：滚动条出现时吃掉右侧 4px，左侧补回同宽，导航项始终与底部按钮对齐居中 */
+  padding-left: var(--se-scrollbar-width, 0px);
+  transition: padding-left var(--transition);
+}
 .se-rail-group { padding: 4px 0 6px; }
 .se-rail-group + .se-rail-group { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 10px; }
 .se-rail-group-label {
