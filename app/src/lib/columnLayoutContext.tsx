@@ -11,15 +11,12 @@ export type ColumnLayoutValue = {
   setWFiles: (fn: number | ((n: number) => number)) => void;
   setWParams: (fn: number | ((n: number) => number)) => void;
   resizeFiles: (dx: number) => void;
-  resizeParams: (dx: number) => void;
 };
 
 const ColumnLayoutContext = createContext<ColumnLayoutValue | null>(null);
 
-const FILES_MIN = 200;
+const FILES_MIN = 0;
 const FILES_MAX = 520;
-const PARAMS_MIN = 260;
-const PARAMS_MAX = 720;
 
 export function ColumnLayoutProvider({ children }: { children: ReactNode }) {
   const [wFiles, setWFiles] = useState(280);
@@ -29,13 +26,9 @@ export function ColumnLayoutProvider({ children }: { children: ReactNode }) {
     setWFiles((w) => clamp(w + dx, FILES_MIN, FILES_MAX));
   }, []);
 
-  const resizeParams = useCallback((dx: number) => {
-    setWParams((w) => clamp(w + dx, PARAMS_MIN, PARAMS_MAX));
-  }, []);
-
   const value = useMemo(
-    () => ({ wFiles, wParams, setWFiles, setWParams, resizeFiles, resizeParams }),
-    [wFiles, wParams, resizeFiles, resizeParams],
+    () => ({ wFiles, wParams, setWFiles, setWParams, resizeFiles }),
+    [wFiles, wParams, resizeFiles],
   );
 
   return (

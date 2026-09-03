@@ -49,6 +49,22 @@ test('结果视图切换图标使用偶数像素尺寸避免半像素偏移', as
   assert.match(theme, /\.se-result-view-tab\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;/);
 });
 
+test('播放器结果列可以收缩到零宽', async () => {
+  const [tabsSource, layoutSource, theme] = await Promise.all([
+    readFile(new URL('../src/components/tabs.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/columnLayoutContext.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/styles/theme.css', import.meta.url), 'utf8'),
+  ]);
+
+  assert.match(tabsSource, /const workspaceRef = useRef<HTMLDivElement>\(null\)/);
+  assert.match(tabsSource, /const maxWidth = Math\.max\(0, \(workspaceRef\.current\?\.clientWidth \?\? 0\) - 1\)/);
+  assert.match(tabsSource, /setWParams\(\(width\) => Math\.max\(0, Math\.min\(maxWidth, width \+ dx\)\)\)/);
+  assert.match(tabsSource, /<div ref=\{workspaceRef\} className="se-tab-workspace">/);
+  assert.doesNotMatch(layoutSource, /PARAMS_MAX|resizeParams/);
+  assert.match(theme, /\.se-result-scroll\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;/);
+  assert.match(theme, /\.se-player-controls\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/);
+});
+
 test('参数卡片无文案勾选框不保留标签间距', async () => {
   const uiSource = await readFile(new URL('../src/components/ui.tsx', import.meta.url), 'utf8');
   const tabsSource = await readFile(new URL('../src/components/tabs.tsx', import.meta.url), 'utf8');
@@ -59,17 +75,21 @@ test('参数卡片无文案勾选框不保留标签间距', async () => {
   assert.match(tabsSource, /title="动态压缩 \(Compand\)"[\s\S]*aside=\{<ui\.Checkbox[\s\S]*>\{''\}<\/ui\.Checkbox>\}/);
 });
 
-test('流程步骤编号复用备份编号尺寸且带文案勾选框视觉居中', async () => {
-  const [uiSource, theme] = await Promise.all([
+test('流程节点保留明确的拖拽、端口和参数反馈', async () => {
+  const [uiSource, theme, editor] = await Promise.all([
     readFile(new URL('../src/components/ui.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/styles/theme.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/WorkflowEditor.tsx', import.meta.url), 'utf8'),
   ]);
 
   assert.match(uiSource, /se-check\$\{hasLabel \? ' has-label' : ''\}/);
   assert.match(uiSource, /se-radio has-label/);
-  assert.match(theme, /\.se-dit-destination-index,\s*\.se-workflow-node-index\s*\{[^}]*width:\s*var\(--ctrl-h\);[^}]*height:\s*var\(--ctrl-h\);/);
-  assert.match(theme, /\.se-workflow-node-head\s*\{[^}]*grid-template-columns:\s*var\(--ctrl-h\) minmax\(0, 1fr\) auto;/);
-  assert.doesNotMatch(theme, /\.se-workflow-node-index\s*\{[^}]*width:\s*24px;/);
+  assert.match(theme, /\.se-workflow-flow-node\s*\{[^}]*width:\s*268px;[^}]*cursor:\s*grab;/);
+  assert.match(theme, /\.se-workflow-node-header\s*\{[^}]*display:\s*flex;[^}]*justify-content:\s*space-between;/);
+  assert.match(theme, /\.se-workflow-handle\.react-flow__handle\s*\{[^}]*width:\s*9px;[^}]*min-height:\s*9px;[^}]*border-radius:\s*0;/);
+  assert.match(theme, /\.se-workflow-handle\.react-flow__handle::before\s*\{[^}]*width:\s*24px;[^}]*height:\s*24px;/);
+  assert.match(editor, /<Handle[\s\S]*type=\{kind\}/);
+  assert.doesNotMatch(theme, /\.se-workflow-node-index/);
   assert.match(theme, /\.se-check\.has-label > \.se-check-box,\s*\.se-radio\.has-label > \.se-radio-box\s*\{\s*transform:\s*translateY\(-1px\);\s*\}/);
 });
 
@@ -92,8 +112,10 @@ test('所有条件参数行统一复用共享行补位动画', async () => {
   assert.match(outputSettings, /const rows: ui\.AnimatedFieldRow\[\][\s\S]*<ui\.AnimatedFieldGrid rows=\{rows\} tight/);
   assert.match(ditTabs, /const executionRows: ui\.AnimatedFieldRow\[\][\s\S]*<ui\.AnimatedFieldGrid rows=\{executionRows\}/);
   assert.match(ditTabs, /className="se-dit-destinations"[\s\S]*itemClassName="se-dit-destination-motion"[\s\S]*layout="flow"/);
-  assert.match(workflowEditor, /const conditionRows: ui\.AnimatedFieldRow\[\][\s\S]*<ui\.AnimatedFieldGrid rows=\{conditionRows\}/);
-  assert.match(workflowEditor, /const actionRows: ui\.AnimatedFieldRow\[\][\s\S]*<ui\.AnimatedFieldGrid rows=\{actionRows\}/);
+  assert.match(workflowEditor, /function WorkflowGraphCanvas[\s\S]*<ReactFlow[\s\S]*onNodeDragStop=/);
+  assert.match(workflowEditor, /function WorkflowNodeEditor[\s\S]*<ui\.ComboBox/);
+  assert.doesNotMatch(workflowEditor, /const conditionRows: ui\.AnimatedFieldRow\[\]/);
+  assert.doesNotMatch(workflowEditor, /const actionRows: ui\.AnimatedFieldRow\[\]/);
   for (const source of [tabs, presets, outputSettings, ditTabs, workflowEditor]) {
     assert.doesNotMatch(source, /se-field-collapse/);
   }
@@ -201,4 +223,18 @@ test('非编码预设管理器沿用主界面分组列表并共享单一滚动�
   assert.match(workflowEditor, /title="管理流程预设"[\s\S]*scrollEditor/);
   assert.match(theme, /\.se-workflow-preset-editor\s*\{[^}]*flex:\s*0 0 auto;[^}]*display:\s*flex;/);
   assert.doesNotMatch(theme, /\.se-workflow-preset-editor\s*\{[^}]*overflow-y:\s*auto/);
+});
+
+test('参数面板使用紧凑标题栏折叠且预设管理默认展开', async () => {
+  const [ui, presets, theme] = await Promise.all([
+    readFile(new URL('../src/components/ui.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/presetSystem.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/styles/theme.css', import.meta.url), 'utf8'),
+  ]);
+
+  assert.match(ui, /className="se-group-head-toggle"[\s\S]*aria-expanded=\{open\}[\s\S]*onClick=\{\(\) => setOpen/);
+  assert.doesNotMatch(ui, /className="se-group-collapse"/);
+  assert.doesNotMatch(presets, /title=\{builderTitle \?\? '预设管理'\}[\s\S]{0,160}defaultOpen=\{false\}/);
+  assert.match(theme, /\.se-group-head\s*\{[^}]*padding:\s*0;[^}]*min-height:\s*30px;/);
+  assert.match(theme, /\.se-group-head-toggle\s*\{[^}]*padding:\s*5px 10px;/);
 });

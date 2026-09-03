@@ -472,12 +472,16 @@ export function FileListProvider({ children }: { children: ReactNode }) {
       backendReadyRef.current = true;
       const pending = pendingBeforeReadyRef.current;
       pendingBeforeReadyRef.current = null;
-      if (pending && snapshot.sources.length === 0) {
+      if (pending) {
         queueSourceCommit(pending, localChangeVersionRef.current);
         return;
       }
-      if (pending) {
-        console.error('Agent 素材状态初始化期间发生了本地编辑，已保留后端现有素材列表');
+      if (snapshot.sources.length > 0
+        || snapshot.selectedPaths.length > 0
+        || snapshot.selectedSourcePaths.length > 0
+        || snapshot.activePath) {
+        queueSourceCommit({ paths: [], selectedPaths: [], selectedSourcePaths: [], activePath: null }, localChangeVersionRef.current);
+        return;
       }
       applySourceSnapshot(snapshot);
     }).catch((error) => console.error('无法初始化 Agent 素材状态', error));

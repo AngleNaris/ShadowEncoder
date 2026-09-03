@@ -32,11 +32,12 @@ test('功能 Tab 立即反馈导航并延后重页面渲染', async () => {
 
   assert.match(appSource, /const renderedTab = useDeferredValue\(tab\)/);
   assert.match(appSource, /const switchTab = useCallback[\s\S]*setTab\(\(currentTab\) => currentTab === targetTab \? currentTab : targetTab\)/);
-  assert.match(appSource, /const Current = TABS\[renderedTab\]\.Comp/);
+  assert.match(appSource, /const \[visitedTabs, setVisitedTabs\] = useState/);
+  assert.match(appSource, /TABS\.map\(\(item, index\)[\s\S]*hidden=\{!active\}[\s\S]*<VideoPlayerVisibilityProvider active=\{active\}>/);
   assert.doesNotMatch(appSource, /preparePreviewTransition|PREVIEW_FADE_MS|setTimeout\(resolve|TabActivityProvider|mountedTabs/);
   assert.match(playerSource, /const SHARED_NATIVE_PLAYER_ID = 'shadowencoder-main-preview'/);
   assert.match(playerSource, /ensureNativePlayerInitialized\(mpvPlayerId\)/);
-  assert.doesNotMatch(playerSource, /nativePlayerStatusCache|useTabActive|VideoPlayerImpl/);
+  assert.match(playerSource, /useContext\(VideoPlayerVisibleContext\) \? <VideoPlayerImpl/);
   assert.match(playerSource, /scheduleNativePlayerHide\(playerId\)[\s\S]*scheduleNativePlayerDestroy\(playerId\)/);
   assert.match(playerSource, /mpvAvailable && \(modalLayerOpen \|\| !mpvPending \|\| !nativeSurfaceRevealReady\)/);
   assert.match(playerSource, /const \[mpvPending, setMpvPending\] = useState\(\(\) => \([\s\S]*Boolean\(props\.filePath\?\.trim\(\)\)/);

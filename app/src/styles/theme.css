@@ -703,6 +703,8 @@ button.se-rail-brand:active:not(:disabled) {
   overflow: hidden;
   background: var(--bg);
 }
+.se-tab-surface { display: contents; }
+.se-tab-surface[hidden] { display: none; }
 .se-tab-workspace { display: flex; flex-direction: row; flex: 1; width: 100%; min-height: 0; background: var(--bg); }
 
 /* 拖拽分隔条：1px 居中分隔线 + 透明扩展命中区（去掉 5px 色带，保证两侧对称） */
@@ -777,7 +779,9 @@ button.se-rail-brand:active:not(:disabled) {
 .se-result-head .se-progress { flex: 1 1 auto; min-width: 0; }
 .se-result-scroll {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 12px;
   display: flex;
@@ -871,10 +875,29 @@ button.se-result-view-tab:hover:not(:disabled) {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 9px 12px;
+  padding: 0;
   border-bottom: 1px solid var(--border);
-  min-height: 38px;
+  min-height: 30px;
+  transition: border-color var(--transition);
 }
+.se-group.is-collapsed .se-group-head { border-bottom-color: transparent; }
+.se-group-head-toggle {
+  align-self: stretch;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  padding: 5px 10px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  justify-content: flex-start;
+  text-align: left;
+}
+.se-group-head-toggle:hover { background: var(--surface-3); }
+.se-group-head-toggle:focus-visible { outline: 1px solid var(--primary); outline-offset: -1px; }
+.se-group-head-actions { display: inline-flex; align-items: center; gap: 8px; min-width: 0; padding-right: 8px; }
 .se-group-title {
   font-size: 12px;
   font-weight: 600;
@@ -891,6 +914,64 @@ button.se-result-view-tab:hover:not(:disabled) {
   background: var(--primary);
 }
 .se-group-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; transition: var(--layout-transition); }
+
+.se-context-menu {
+  position: fixed;
+  z-index: 10020;
+  min-width: 176px;
+  max-height: min(560px, calc(100vh - 16px));
+  overflow-y: auto;
+  padding: 0 0 4px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: 8px 8px 0 rgba(0, 0, 0, .28);
+  transform-origin: var(--se-context-menu-origin-x) var(--se-context-menu-origin-y);
+  animation: se-context-menu-in 140ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+@keyframes se-context-menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.se-context-menu.is-closing {
+  pointer-events: none;
+  animation: se-context-menu-out 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+@keyframes se-context-menu-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-4px) scale(.98); }
+}
+.se-context-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.se-context-menu button:hover:not(:disabled),
+.se-context-menu button:focus-visible { color: var(--text); background: var(--primary-soft); outline: 0; }
+.se-context-menu button.is-danger { color: var(--error); }
+.se-context-menu button.has-separator { margin-top: 4px; border-top: 1px solid var(--border); }
+.se-context-menu button:disabled { opacity: .45; cursor: default; }
+.se-context-menu-icon { display: inline-flex; width: 16px; flex: none; align-items: center; justify-content: center; }
+.se-context-menu-group-label {
+  min-height: 27px;
+  padding: 7px 12px 5px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: left;
+}
+.se-context-menu-group-label:first-child { border-top: 0; }
 
 /* ═══════════ 文本层级 ═══════════ */
 .se-section-title {
@@ -1352,8 +1433,7 @@ button.se-result-view-tab:hover:not(:disabled) {
   align-items: center;
   gap: 6px;
 }
-.se-dit-destination-index,
-.se-workflow-node-index {
+.se-dit-destination-index {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1369,95 +1449,28 @@ button.se-result-view-tab:hover:not(:disabled) {
 }
 .se-dit-destination .se-icon-btn { min-width: var(--ctrl-h); min-height: var(--ctrl-h); padding: 0; }
 
-/* 流程编辑器：主界面与预设管理器共用同一套紧凑步骤/分支结构。 */
-.se-workflow-node-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
-.se-workflow-add {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  min-width: 0;
-}
-.se-workflow-nodes {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  min-width: 0;
-  --se-animated-list-gap: 8px;
-}
-.se-workflow-node-motion,
-.se-workflow-node { min-width: 0; width: 100%; }
-.se-workflow-node {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 8px 8px 9px;
-  border-left: 2px solid var(--primary-line);
-  border-bottom: 1px solid var(--border);
-  transition: border-color var(--transition), background var(--transition), color var(--transition);
-}
-.se-workflow-node:hover { border-left-color: var(--primary); background: var(--surface-3); }
-.se-workflow-condition { border-left-color: var(--primary); }
-.se-workflow-node.has-issue { border-left-color: var(--error); background: var(--error-soft); }
-.se-workflow-node-head {
-  display: grid;
-  grid-template-columns: var(--ctrl-h) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.se-workflow-node-actions { display: flex; align-items: center; gap: 3px; }
-.se-workflow-node-actions .se-icon-btn { min-width: var(--ctrl-h); min-height: var(--ctrl-h); padding: 0; }
-.se-workflow-node-fields {
-  min-width: 0;
-  padding-left: calc(var(--ctrl-h) + 8px);
-  container-type: inline-size;
-}
-.se-workflow-node-fields > .se-field-grid { width: 100%; }
-.se-workflow-node-head > .MuiFormControl-root { width: 100%; min-width: 0; max-width: 100%; }
 .se-workflow-node-issue {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-height: var(--ctrl-h);
-  margin-left: calc(var(--ctrl-h) + 8px);
   color: var(--error);
   font-size: 11px;
 }
-.se-workflow-branches {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-  margin-left: calc(var(--ctrl-h) + 8px);
-}
-.se-workflow-branch {
-  min-width: 0;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-strong);
-}
-.se-workflow-branch.is-then { border-left-color: var(--success); }
-.se-workflow-branch.is-else { border-left-color: var(--text-faint); }
-.se-workflow-branch-title {
-  margin-bottom: 7px;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-.se-workflow-branch.is-then > .se-workflow-branch-title { color: var(--success); }
-.se-workflow-branch .se-empty { min-height: 40px; padding: 10px; }
 .se-workflow-validation {
+  position: absolute;
+  z-index: 4;
+  bottom: 12px;
+  left: 12px;
+  max-width: min(460px, calc(100% - 104px));
   padding: 8px 10px;
   color: var(--error);
   background: var(--error-soft);
   border-left: 2px solid var(--error);
   font-size: 12px;
   line-height: 1.5;
+  pointer-events: none;
 }
 .se-workflow-preset-editor {
   flex: 0 0 auto;
@@ -1466,15 +1479,214 @@ button.se-result-view-tab:hover:not(:disabled) {
   flex-direction: column;
   gap: 10px;
 }
-.se-workflow-node-list.depth-2 .se-workflow-node-head,
-.se-workflow-node-list.depth-3 .se-workflow-node-head {
-  grid-template-columns: var(--ctrl-h) minmax(0, 1fr);
+.se-workflow-graph-viewport {
+  position: relative;
+  height: clamp(420px, 58vh, 640px);
+  max-height: 640px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  overscroll-behavior: contain;
 }
-.se-workflow-node-list.depth-2 .se-workflow-node-actions,
-.se-workflow-node-list.depth-3 .se-workflow-node-actions {
-  grid-column: 2;
-  justify-content: flex-end;
+.se-workflow-graph-viewport .react-flow,
+.se-workflow-graph-viewport .react-flow__viewport { width: 100%; height: 100%; }
+.se-workflow-graph-viewport .react-flow__pane { cursor: default; }
+.se-workflow-graph-viewport .react-flow__pane.dragging { cursor: grabbing; }
+.se-workflow-graph-viewport .react-flow__edge-path {
+  stroke: var(--primary);
+  stroke-width: 2;
+  transition: stroke var(--transition), stroke-width var(--transition);
 }
+.se-workflow-graph-viewport .react-flow__edge.is-bool .react-flow__edge-path { stroke: var(--success); }
+.se-workflow-graph-viewport .react-flow__edge.is-number .react-flow__edge-path { stroke: var(--warning); }
+.se-workflow-graph-viewport .react-flow__edge.is-report .react-flow__edge-path { stroke: var(--supporting, var(--primary-bright)); }
+.se-workflow-graph-viewport .react-flow__edge.is-error .react-flow__edge-path { stroke: var(--error); }
+.se-workflow-graph-viewport .react-flow__edge:hover .react-flow__edge-path,
+.se-workflow-graph-viewport .react-flow__edge.selected .react-flow__edge-path { stroke-width: 3; }
+.se-workflow-graph-viewport .react-flow__controls {
+  overflow: hidden;
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  box-shadow: none;
+}
+.se-workflow-graph-viewport .react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+  color: var(--text-muted);
+  background: var(--surface-3);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+.se-workflow-graph-viewport .react-flow__controls-button:hover { color: var(--text); background: var(--surface-4); }
+.se-workflow-graph-viewport .react-flow__controls-button svg { fill: currentColor; }
+.se-workflow-help-dialog {
+  width: min(390px, calc(100vw - 32px));
+  padding: 0;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  box-shadow: 8px 8px 0 rgba(0, 0, 0, .3);
+}
+.se-workflow-help-dialog::backdrop { background: rgba(0, 0, 0, .56); }
+.se-workflow-help-content { display: grid; gap: 14px; padding: 16px; }
+.se-workflow-help-content header { padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.se-workflow-help-content dl { display: grid; gap: 8px; margin: 0; }
+.se-workflow-help-content dl > div { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 10px; }
+.se-workflow-help-content dt { color: var(--text); font-size: 11px; font-weight: 700; }
+.se-workflow-help-content dd { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.se-workflow-help-content > button { justify-self: end; }
+.se-workflow-flow-node {
+  box-sizing: border-box;
+  width: 268px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--primary);
+  box-shadow: 2px 2px 0 var(--surface-4);
+  cursor: grab;
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+.se-workflow-flow-node:hover { background: var(--surface-3); border-color: var(--primary); }
+.se-workflow-flow-node.selected { background: var(--surface-3); border-color: var(--primary-bright); box-shadow: 4px 4px 0 var(--primary-line); }
+.se-workflow-flow-node.is-probe { border-left-color: var(--warning); }
+.se-workflow-flow-node.is-logic,
+.se-workflow-flow-node.is-gate { border-left-color: var(--success); }
+.se-workflow-flow-node.is-filter { border-left-color: var(--warning); }
+.se-workflow-flow-node.is-output { border-left-color: var(--supporting, var(--primary-bright)); }
+.se-workflow-flow-node.is-start { width: 132px; border-left-color: var(--success); }
+.se-workflow-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.se-workflow-node-header > div { min-width: 0; }
+.se-workflow-node-header span {
+  display: block;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+.se-workflow-node-header strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.se-workflow-port-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 30px;
+  padding: 5px 0;
+}
+.se-workflow-flow-node.is-start .se-workflow-port-grid { grid-template-columns: 1fr; }
+.se-workflow-port-stack { display: grid; align-content: center; gap: 1px; }
+.se-workflow-port-stack.is-output { grid-column: 2; }
+.se-workflow-flow-node.is-start .se-workflow-port-stack.is-output { grid-column: 1; }
+.se-workflow-port-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 25px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+.se-workflow-port-row.is-target { justify-content: flex-start; padding-left: 12px; }
+.se-workflow-port-row.is-source { justify-content: flex-end; padding-right: 12px; }
+.se-workflow-handle.react-flow__handle {
+  position: absolute;
+  top: 50%;
+  box-sizing: border-box;
+  width: 9px;
+  min-width: 9px;
+  height: 9px;
+  min-height: 9px;
+  color: var(--primary);
+  background: var(--surface-1);
+  border: 1px solid currentColor;
+  border-radius: 0;
+  transform: translateY(-50%);
+  transition: opacity var(--transition), background var(--transition), box-shadow var(--transition);
+}
+.se-workflow-handle.react-flow__handle::before {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 24px;
+  height: 24px;
+  content: '';
+  transform: translate(-50%, -50%);
+}
+.se-workflow-handle.react-flow__handle-left { left: 0; transform: translate(-50%, -50%); }
+.se-workflow-handle.react-flow__handle-right { right: 0; transform: translate(50%, -50%); }
+.se-workflow-handle.is-bool { color: var(--success); }
+.se-workflow-handle.is-number { color: var(--warning); }
+.se-workflow-handle.is-report { color: var(--supporting, var(--primary-bright)); }
+.se-workflow-handle.is-error { color: var(--error); }
+.se-workflow-handle.react-flow__handle:hover,
+.se-workflow-handle.react-flow__handle.connectingto,
+.se-workflow-handle.react-flow__handle.connectingfrom,
+.se-workflow-handle.is-connection-origin,
+.se-workflow-handle.is-connectable-target { background: currentColor; box-shadow: 0 0 0 7px color-mix(in srgb, currentColor 14%, transparent); }
+.se-workflow-handle.is-connectable-target { opacity: 1; }
+.se-workflow-handle.is-incompatible-target { opacity: .22; }
+.se-workflow-node-collapse { border-top: 1px solid var(--border); }
+.se-workflow-node-collapse > div { padding: 0 10px 10px; }
+.se-workflow-node-editor {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  cursor: default;
+  user-select: text;
+}
+.se-workflow-node-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+.se-workflow-node-field > .MuiFormControl-root,
+.se-workflow-node-editor .MuiFormControl-root,
+.se-workflow-node-editor .se-num { width: 100%; min-width: 0; }
+.se-workflow-node-editor .se-workflow-node-issue { min-height: 0; line-height: 1.45; }
+.se-workflow-node-note { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.se-workflow-output-path {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+.se-workflow-node-header .se-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.se-workflow-node-header .se-icon-btn:hover:not(:disabled) { color: var(--error); background: var(--error-soft); }
+.se-workflow-graph-viewport,
+.se-workflow-graph-viewport * { scrollbar-width: none; }
+.se-workflow-graph-viewport::-webkit-scrollbar,
+.se-workflow-graph-viewport *::-webkit-scrollbar { width: 0; height: 0; }
 
 /* 通用空状态 */
 .se-empty {
@@ -1745,9 +1957,6 @@ button.se-result-view-tab:hover:not(:disabled) {
   font-size: 12px;
   flex: none;
 }
-.se-statusbar .se-status-live { display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); min-width: 0; max-width: 52%; }
-.se-status-live-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.se-status-dot { width: 7px; height: 7px; background: var(--success); flex: none; }
 .se-statusbar .grow { flex: 1; color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .se-statusbar .author { color: var(--text-faint); padding-left: 12px; flex: none; user-select: none; }
 .se-statusbar .update-btn {
@@ -2828,6 +3037,25 @@ html.se-modal-layer-pending .se-dialog-backdrop {
 .se-preset-card:hover { border-color: var(--ctrl-border-hover); }
 .se-preset-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .se-preset-card-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.se-preset-summary-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 10px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.se-preset-summary-toggle:hover:not(:disabled) { color: var(--text); border-color: var(--ctrl-border-hover); }
+.se-preset-summary-toggle svg { transition: transform var(--transition); }
+.se-preset-summary-toggle.is-open svg { transform: rotate(45deg); }
+.se-preset-summary-toggle:disabled { cursor: default; opacity: .55; }
 .se-preset-type {
   font-size: 10px;
   font-weight: 600;
@@ -2939,6 +3167,8 @@ html.se-modal-layer-pending .se-dialog-backdrop {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow: hidden;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-top: none;

@@ -10,7 +10,7 @@ mod mpv_windows;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -117,9 +117,6 @@ fn output_paths_equal(input: &Path, output: &Path) -> bool {
 }
 
 fn unique_output_path(path: PathBuf) -> Result<PathBuf, String> {
-    if !path.exists() {
-        return Ok(path);
-    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let stem = path
         .file_stem()
@@ -129,18 +126,67 @@ fn unique_output_path(path: PathBuf) -> Result<PathBuf, String> {
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    for index in 2..=1_000_000_u32 {
+    let mut reservations = reserved_output_paths()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for index in 1..=1_000_000_u32 {
         let filename = if extension.is_empty() {
-            format!("{stem}_{index}")
+            if index == 1 {
+                stem.to_string()
+            } else {
+                format!("{stem}_{index}")
+            }
         } else {
-            format!("{stem}_{index}.{extension}")
+            if index == 1 {
+                format!("{stem}.{extension}")
+            } else {
+                format!("{stem}_{index}.{extension}")
+            }
         };
         let candidate = parent.join(filename);
-        if !candidate.exists() {
+        let key = output_reservation_key(&candidate);
+        if !candidate.exists() && reservations.insert(key) {
             return Ok(candidate);
         }
     }
     Err(format!("无法为同名输出生成唯一文件名: {}", path.display()))
+}
+
+static RESERVED_OUTPUT_PATHS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn reserved_output_paths() -> &'static Mutex<HashSet<String>> {
+    RESERVED_OUTPUT_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn output_reservation_key(path: &Path) -> String {
+    let path = path.to_string_lossy().to_string();
+    if cfg!(windows) {
+        path.to_ascii_lowercase()
+    } else {
+        path
+    }
+}
+
+struct OutputPathReservation {
+    key: Option<String>,
+}
+
+impl OutputPathReservation {
+    fn for_unique_output(path: &Path, unique_name: bool) -> Self {
+        Self {
+            key: unique_name.then(|| output_reservation_key(path)),
+        }
+    }
+}
+
+impl Drop for OutputPathReservation {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            if let Ok(mut reservations) = reserved_output_paths().lock() {
+                reservations.remove(&key);
+            }
+        }
+    }
 }
 
 fn unique_output_directory(path: PathBuf) -> Result<PathBuf, String> {
@@ -435,13 +481,48 @@ fn emit_file_log(
 /// 通用：spawn ffmpeg，逐行解析进度并推事件，返回 (success, last_stderr)
 type ActiveFfmpeg = Arc<Mutex<Option<Child>>>;
 
-static ACTIVE_FFMPEG: OnceLock<Mutex<HashMap<String, ActiveFfmpeg>>> = OnceLock::new();
+type ActiveFfmpegTasks = HashMap<usize, ActiveFfmpeg>;
+
+static ACTIVE_FFMPEG: OnceLock<Mutex<HashMap<String, ActiveFfmpegTasks>>> = OnceLock::new();
 static GIF_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 static DIT_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+static TRANSCODE_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 static DIT_TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static FFMPEG_TASK_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
-fn active_ffmpeg() -> &'static Mutex<HashMap<String, ActiveFfmpeg>> {
+fn active_ffmpeg() -> &'static Mutex<HashMap<String, ActiveFfmpegTasks>> {
     ACTIVE_FFMPEG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_ffmpeg_task_id() -> usize {
+    FFMPEG_TASK_SEQUENCE
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1)
+}
+
+fn register_active_ffmpeg(key: &str, task_id: usize, active: ActiveFfmpeg) -> Result<(), String> {
+    active_ffmpeg()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .entry(key.to_string())
+        .or_default()
+        .insert(task_id, active);
+    Ok(())
+}
+
+fn remove_active_ffmpeg(key: &str, task_id: usize) -> Result<(), String> {
+    let mut processes = active_ffmpeg().lock().map_err(|error| error.to_string())?;
+    let remove_window = processes
+        .get_mut(key)
+        .map(|tasks| {
+            tasks.remove(&task_id);
+            tasks.is_empty()
+        })
+        .unwrap_or(false);
+    if remove_window {
+        processes.remove(key);
+    }
+    Ok(())
 }
 
 fn gif_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
@@ -450,6 +531,10 @@ fn gif_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
 
 fn dit_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
     DIT_CANCEL_FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn transcode_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    TRANSCODE_CANCEL_FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn summarize_ffmpeg_stderr(lines: &VecDeque<String>) -> String {
@@ -502,15 +587,10 @@ fn run_with_progress_source(
     context: ProgressContext,
 ) -> Result<(), String> {
     let key = window.label().to_string();
+    let task_id = next_ffmpeg_task_id();
     let active = Arc::new(Mutex::new(None));
     let mut active_child = active.lock().map_err(|error| error.to_string())?;
-    {
-        let mut processes = active_ffmpeg().lock().map_err(|error| error.to_string())?;
-        if processes.contains_key(&key) {
-            return Err("已有任务正在运行".into());
-        }
-        processes.insert(key.clone(), active.clone());
-    }
+    register_active_ffmpeg(&key, task_id, active.clone())?;
 
     let mut cmd = media_command("ffmpeg");
     cmd.args(["-progress", "pipe:2", "-nostats"])
@@ -519,20 +599,14 @@ fn run_with_progress_source(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
-            active_ffmpeg()
-                .lock()
-                .map_err(|lock_error| lock_error.to_string())?
-                .remove(&key);
+            remove_active_ffmpeg(&key, task_id)?;
             return Err(format!("无法启动 ffmpeg: {error}"));
         }
     };
     let Some(stderr) = child.stderr.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        active_ffmpeg()
-            .lock()
-            .map_err(|error| error.to_string())?
-            .remove(&key);
+        remove_active_ffmpeg(&key, task_id)?;
         return Err("无法读取 ffmpeg 错误输出".to_string());
     };
     *active_child = Some(child);
@@ -624,10 +698,7 @@ fn run_with_progress_source(
         .ok_or_else(|| "任务已取消".to_string())?
         .wait()
         .map_err(|error| error.to_string());
-    active_ffmpeg()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .remove(&key);
+    remove_active_ffmpeg(&key, task_id)?;
     let status = status?;
     if status.success() {
         emit_log(window, &format!("[PASS] {} 完成", stage));
@@ -684,28 +755,47 @@ fn cancel_ffmpeg(window: tauri::Window) -> Result<bool, String> {
     } else {
         false
     };
+    let transcode_cancelled = if let Some(cancelled) = transcode_cancel_flags()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .get(window.label())
+        .cloned()
+    {
+        cancelled.store(true, Ordering::Relaxed);
+        true
+    } else {
+        false
+    };
     let active = active_ffmpeg()
         .lock()
         .map_err(|error| error.to_string())?
         .get(window.label())
-        .cloned();
-    let Some(active) = active else {
+        .map(|tasks| tasks.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if active.is_empty() {
         if dit_cancelled {
             emit_log(&window, "[CANCEL] 正在停止 DIT 备份任务");
         }
-        return Ok(gif_cancelled || dit_cancelled);
-    };
-    let mut child = active.lock().map_err(|error| error.to_string())?;
-    if let Some(process) = child.as_mut() {
-        process.kill().map_err(|error| error.to_string())?;
-        emit_log(&window, "[CANCEL] 正在停止 FFmpeg 任务");
-        Ok(true)
-    } else {
-        if gif_cancelled {
-            emit_log(&window, "[CANCEL] 正在停止 Gifski 编码");
-        }
-        Ok(gif_cancelled || dit_cancelled)
+        return Ok(gif_cancelled || dit_cancelled || transcode_cancelled);
     }
+    let mut stopped = 0usize;
+    for active in active {
+        let mut child = active.lock().map_err(|error| error.to_string())?;
+        if let Some(process) = child.as_mut() {
+            if process.kill().is_ok() {
+                stopped += 1;
+            }
+        }
+    }
+    if stopped > 0 {
+        emit_log(
+            &window,
+            &format!("[CANCEL] 正在停止 {stopped} 个 FFmpeg 任务"),
+        );
+    } else if gif_cancelled {
+        emit_log(&window, "[CANCEL] 正在停止 Gifski 编码");
+    }
+    Ok(stopped > 0 || gif_cancelled || dit_cancelled || transcode_cancelled)
 }
 
 async fn run_blocking<F, T>(task: F) -> Result<T, String>
@@ -1193,15 +1283,9 @@ fn export_gif_with_gifski(
     window: &tauri::Window,
 ) -> Result<(), String> {
     let key = window.label().to_string();
+    let task_id = next_ffmpeg_task_id();
     let cancelled = Arc::new(AtomicBool::new(false));
     let active = Arc::new(Mutex::new(None));
-    if active_ffmpeg()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .contains_key(&key)
-    {
-        return Err("已有任务正在运行".into());
-    }
 
     let (quality, lossy_quality, motion_quality) = compression.gifski_quality();
     let settings = gifski::Settings {
@@ -1257,16 +1341,16 @@ fn export_gif_with_gifski(
         }
     };
     *active.lock().map_err(|error| error.to_string())? = Some(child);
-    {
-        let mut processes = active_ffmpeg().lock().map_err(|error| error.to_string())?;
-        if processes.contains_key(&key) {
-            if let Some(mut child) = active.lock().map_err(|error| error.to_string())?.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            return Err("已有任务正在运行".into());
+    if let Err(error) = register_active_ffmpeg(&key, task_id, active.clone()) {
+        if let Some(mut child) = active
+            .lock()
+            .map_err(|lock_error| lock_error.to_string())?
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
         }
-        processes.insert(key.clone(), active.clone());
+        return Err(error);
     }
     gif_cancel_flags()
         .lock()
@@ -1295,10 +1379,7 @@ fn export_gif_with_gifski(
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            active_ffmpeg()
-                .lock()
-                .map_err(|error| error.to_string())?
-                .remove(&key);
+            remove_active_ffmpeg(&key, task_id)?;
             gif_cancel_flags()
                 .lock()
                 .map_err(|error| error.to_string())?
@@ -1369,10 +1450,7 @@ fn export_gif_with_gifski(
         .map_err(|error| error.to_string())?;
     let stderr_last = stderr_thread.join().unwrap_or_default();
     let writer_join = writer_thread.join();
-    active_ffmpeg()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .remove(&key);
+    remove_active_ffmpeg(&key, task_id)?;
     gif_cancel_flags()
         .lock()
         .map_err(|error| error.to_string())?
@@ -1993,6 +2071,25 @@ fn append_video_profile(args: &mut Vec<String>, codec: &str, profile: &str) {
     args.extend(["-profile:v".into(), mapped.into()]);
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscodeItemResult {
+    source_path: String,
+    status: String,
+    output_path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscodeBatchResult {
+    items: Vec<TranscodeItemResult>,
+    output_paths: Vec<String>,
+    completed: usize,
+    failed: usize,
+    canceled: bool,
+}
+
 fn transcode_blocking(
     paths: Vec<String>,
     video_codec: String,
@@ -2028,8 +2125,9 @@ fn transcode_blocking(
     target_file_size_mb: f64,
     two_pass: bool,
     output_options: Option<OutputOptions>,
+    cancelled: Arc<AtomicBool>,
     window: tauri::Window,
-) -> Result<Vec<String>, String> {
+) -> Result<TranscodeBatchResult, String> {
     let input_kind = if audio_only {
         InputMediaKind::AudioVisual
     } else {
@@ -2078,8 +2176,23 @@ fn transcode_blocking(
         container.as_str()
     };
     let mut outputs = Vec::new();
+    let mut items = Vec::with_capacity(files.len());
+    let mut failed = 0usize;
+    let mut batch_cancelled = false;
 
-    for (file_index, p) in files.iter().enumerate() {
+    'files: for (file_index, p) in files.iter().enumerate() {
+        if cancelled.load(Ordering::Relaxed) {
+            batch_cancelled = true;
+            for path in files.iter().skip(file_index) {
+                items.push(TranscodeItemResult {
+                    source_path: path.clone(),
+                    status: "canceled".into(),
+                    output_path: None,
+                    error: None,
+                });
+            }
+            break;
+        }
         emit_file_log(
             &window,
             "file_start",
@@ -2090,9 +2203,24 @@ fn transcode_blocking(
             "等待处理",
         );
         let dur = probe_duration(p);
-        let out = resolve_output_path(p, output_options.as_ref(), "", ext)?
-            .to_string_lossy()
-            .to_string();
+        let out = match resolve_output_path(p, output_options.as_ref(), "", ext) {
+            Ok(path) => path.to_string_lossy().to_string(),
+            Err(error) => {
+                failed += 1;
+                emit_file_log(&window, "file_end", file_index + 1, files.len(), p, "fail", &error);
+                items.push(TranscodeItemResult {
+                    source_path: p.clone(), status: "failed".into(), output_path: None, error: Some(error),
+                });
+                continue;
+            }
+        };
+        // Keep a unique destination reserved until FFmpeg has created or abandoned it.
+        let _output_reservation = OutputPathReservation::for_unique_output(
+            Path::new(&out),
+            output_options
+                .as_ref()
+                .is_some_and(|options| options.unique_name),
+        );
 
         // ── 仅音频：显式移除视频轨，不再误用视频流复制 ──
         if audio_only {
@@ -2108,7 +2236,7 @@ fn transcode_blocking(
             );
             c.push(out.clone());
             emit_log(&window, &format!("仅输出音频: {}", p));
-            run_with_progress_source(
+            if let Err(error) = run_with_progress_source(
                 &c,
                 dur,
                 &window,
@@ -2120,9 +2248,23 @@ fn transcode_blocking(
                     phase_index: 0,
                     phase_count: 1,
                 },
-            )?;
+            ) {
+                if cancelled.load(Ordering::Relaxed) {
+                    batch_cancelled = true;
+                    items.push(TranscodeItemResult { source_path: p.clone(), status: "canceled".into(), output_path: None, error: None });
+                    for path in files.iter().skip(file_index + 1) {
+                        items.push(TranscodeItemResult { source_path: path.clone(), status: "canceled".into(), output_path: None, error: None });
+                    }
+                    break 'files;
+                }
+                failed += 1;
+                emit_file_log(&window, "file_end", file_index + 1, files.len(), p, "fail", &error);
+                items.push(TranscodeItemResult { source_path: p.clone(), status: "failed".into(), output_path: None, error: Some(error) });
+                continue;
+            }
             emit_log(&window, &format!("输出位置: {out}"));
-            outputs.push(out);
+            outputs.push(out.clone());
+            items.push(TranscodeItemResult { source_path: p.clone(), status: "completed".into(), output_path: Some(out), error: None });
             emit_file_log(
                 &window,
                 "file_end",
@@ -2159,7 +2301,7 @@ fn transcode_blocking(
             }
             c.push(out.clone());
             emit_log(&window, &format!("视频流复制，处理封装/音频: {}", p));
-            run_with_progress_source(
+            if let Err(error) = run_with_progress_source(
                 &c,
                 dur,
                 &window,
@@ -2171,9 +2313,23 @@ fn transcode_blocking(
                     phase_index: 0,
                     phase_count: 1,
                 },
-            )?;
+            ) {
+                if cancelled.load(Ordering::Relaxed) {
+                    batch_cancelled = true;
+                    items.push(TranscodeItemResult { source_path: p.clone(), status: "canceled".into(), output_path: None, error: None });
+                    for path in files.iter().skip(file_index + 1) {
+                        items.push(TranscodeItemResult { source_path: path.clone(), status: "canceled".into(), output_path: None, error: None });
+                    }
+                    break 'files;
+                }
+                failed += 1;
+                emit_file_log(&window, "file_end", file_index + 1, files.len(), p, "fail", &error);
+                items.push(TranscodeItemResult { source_path: p.clone(), status: "failed".into(), output_path: None, error: Some(error) });
+                continue;
+            }
             emit_log(&window, &format!("输出位置: {out}"));
-            outputs.push(out);
+            outputs.push(out.clone());
+            items.push(TranscodeItemResult { source_path: p.clone(), status: "completed".into(), output_path: Some(out), error: None });
             emit_file_log(
                 &window,
                 "file_end",
@@ -2371,10 +2527,23 @@ fn transcode_blocking(
                 )
             })();
             cleanup_passlog(&passlog);
-            result?;
+            if let Err(error) = result {
+                if cancelled.load(Ordering::Relaxed) {
+                    batch_cancelled = true;
+                    items.push(TranscodeItemResult { source_path: p.clone(), status: "canceled".into(), output_path: None, error: None });
+                    for path in files.iter().skip(file_index + 1) {
+                        items.push(TranscodeItemResult { source_path: path.clone(), status: "canceled".into(), output_path: None, error: None });
+                    }
+                    break 'files;
+                }
+                failed += 1;
+                emit_file_log(&window, "file_end", file_index + 1, files.len(), p, "fail", &error);
+                items.push(TranscodeItemResult { source_path: p.clone(), status: "failed".into(), output_path: None, error: Some(error) });
+                continue;
+            }
         } else {
             output_args.push(out.clone());
-            run_with_progress_source(
+            if let Err(error) = run_with_progress_source(
                 &output_args,
                 dur,
                 &window,
@@ -2386,10 +2555,24 @@ fn transcode_blocking(
                     phase_index: 0,
                     phase_count: 1,
                 },
-            )?;
+            ) {
+                if cancelled.load(Ordering::Relaxed) {
+                    batch_cancelled = true;
+                    items.push(TranscodeItemResult { source_path: p.clone(), status: "canceled".into(), output_path: None, error: None });
+                    for path in files.iter().skip(file_index + 1) {
+                        items.push(TranscodeItemResult { source_path: path.clone(), status: "canceled".into(), output_path: None, error: None });
+                    }
+                    break 'files;
+                }
+                failed += 1;
+                emit_file_log(&window, "file_end", file_index + 1, files.len(), p, "fail", &error);
+                items.push(TranscodeItemResult { source_path: p.clone(), status: "failed".into(), output_path: None, error: Some(error) });
+                continue;
+            }
         }
         emit_log(&window, &format!("输出位置: {out}"));
-        outputs.push(out);
+        outputs.push(out.clone());
+        items.push(TranscodeItemResult { source_path: p.clone(), status: "completed".into(), output_path: Some(out), error: None });
         emit_file_log(
             &window,
             "file_end",
@@ -2400,8 +2583,15 @@ fn transcode_blocking(
             "转码完成",
         );
     }
-    emit_log(&window, "[PASS] 全部转码完成");
-    Ok(outputs)
+    let completed = outputs.len();
+    if batch_cancelled {
+        emit_log(&window, &format!("[CANCEL] 转码已停止 · 成功 {completed} · 失败 {failed}"));
+    } else if failed > 0 {
+        emit_log(&window, &format!("[WARN] 转码完成 · 成功 {completed} · 失败 {failed}"));
+    } else {
+        emit_log(&window, "[PASS] 全部转码完成");
+    }
+    Ok(TranscodeBatchResult { items, output_paths: outputs, completed, failed, canceled: batch_cancelled })
 }
 
 fn mix_blocking(
@@ -2440,6 +2630,12 @@ fn mix_blocking(
         let out = resolve_output_path(p, output_options.as_ref(), "_mix", "mp4")?
             .to_string_lossy()
             .to_string();
+        let _output_reservation = OutputPathReservation::for_unique_output(
+            Path::new(&out),
+            output_options
+                .as_ref()
+                .is_some_and(|options| options.unique_name),
+        );
         // 按开关逐项拼接音频滤镜链；关闭的项不进入实际命令
         let mut filters: Vec<String> = Vec::new();
         if compand_on {
@@ -4749,7 +4945,16 @@ async fn transcode(
     two_pass: bool,
     output_options: Option<OutputOptions>,
     window: tauri::Window,
-) -> Result<Vec<String>, String> {
+) -> Result<TranscodeBatchResult, String> {
+    let cancelled = {
+        let mut flags = transcode_cancel_flags().lock().map_err(|error| error.to_string())?;
+        let flag = flags
+            .entry(window.label().to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
+        flag.store(false, Ordering::Relaxed);
+        flag
+    };
     run_blocking(move || {
         transcode_blocking(
             paths,
@@ -4786,6 +4991,7 @@ async fn transcode(
             target_file_size_mb,
             two_pass,
             output_options,
+            cancelled,
             window,
         )
     })
@@ -4913,6 +5119,34 @@ fn export_presets_blocking(type_: String, data: String) -> Result<Option<String>
 #[tauri::command]
 async fn export_presets(type_: String, data: String) -> Result<Option<String>, String> {
     run_blocking(move || export_presets_blocking(type_, data)).await
+}
+
+fn write_workflow_log_blocking(directory: String, name: String, content: String) -> Result<String, String> {
+    let directory = PathBuf::from(directory.trim());
+    if directory.as_os_str().is_empty() {
+        return Err("日志输出目录不能为空".into());
+    }
+    std::fs::create_dir_all(&directory).map_err(|error| format!("创建日志目录失败: {error}"))?;
+    let safe_name = sanitize_filename_component(&name);
+    let file_name = if safe_name.is_empty() { "workflow.log".to_string() } else { safe_name };
+    let target = unique_output_path(directory.join(file_name))?;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temporary = directory.join(format!(".shadowencoder-log-{}-{stamp}.tmp", std::process::id()));
+    let mut file = std::fs::File::create(&temporary).map_err(|error| format!("创建日志文件失败: {error}"))?;
+    file.write_all(content.as_bytes()).and_then(|_| file.sync_all()).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("写入日志文件失败: {error}")
+    })?;
+    std::fs::rename(&temporary, &target).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("提交日志文件失败: {error}")
+    })?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn write_workflow_log(directory: String, name: String, content: String) -> Result<String, String> {
+    run_blocking(move || write_workflow_log_blocking(directory, name, content)).await
 }
 
 #[tauri::command]
@@ -5806,6 +6040,7 @@ fn main() {
             list_media_tree,
             probe_path,
             export_presets,
+            write_workflow_log,
             list_storage_volumes,
             get_storage_volume,
             read_media_file,

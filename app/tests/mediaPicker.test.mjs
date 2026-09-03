@@ -84,6 +84,7 @@ test('共享素材列表提供紧凑目录树和部分选中状态', async () =>
   assert.doesNotMatch(css, /\.se-filelist-expand(?:-spacer)?/);
   assert.match(context, /setSelectedKeys\(\(current\) => setTreeSelection\(current, path, currentIndex, shouldSelect\)\)/);
   assert.match(context, /ensureTree\(node\.rootPath\)[\s\S]*setTreeSelection\(current, path, loadedIndex, shouldSelect\)/);
+  assert.match(context, /if \(pending\) \{[\s\S]*queueSourceCommit\(pending,[\s\S]*snapshot\.sources\.length > 0[\s\S]*queueSourceCommit\(\{ paths: \[\], selectedPaths: \[\], selectedSourcePaths: \[\], activePath: null \}/);
   assert.match(ui, /export function FileList\(\{[\s\S]*items = \[\]/);
   assert.match(ui, /export function SharedFilePanel\(\{[\s\S]*items = \[\],[\s\S]*totalCount = 0/);
   assert.match(css, /\.se-filelist li\s*\{[^}]*height:\s*40px;/);

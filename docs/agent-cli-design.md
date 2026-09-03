@@ -183,10 +183,12 @@ shadowencoder-cli source remove <source-id> --revision <n>
 shadowencoder-cli source select <source-id> --revision <n>
 shadowencoder-cli source unselect <source-id> --revision <n>
 
-shadowencoder-cli workflow step-add <workflow-id> <kind> --revision <n>
-shadowencoder-cli workflow step-set <workflow-id> <step-id> <field> <value> --revision <n>
-shadowencoder-cli workflow step-remove <workflow-id> <step-id> --revision <n>
-shadowencoder-cli workflow step-move <workflow-id> <step-id> <after-step-id> --revision <n>
+shadowencoder-cli preset create --type workflow --name <name>
+shadowencoder-cli workflow node-add <workflow-id> <kind> --revision <n>
+shadowencoder-cli workflow node-set <workflow-id> <node-id> <field> <value> --revision <n>
+shadowencoder-cli workflow node-remove <workflow-id> <node-id> --revision <n>
+shadowencoder-cli workflow edge-add <workflow-id> <source> <source-port> <target> <target-port> --revision <n>
+shadowencoder-cli workflow edge-remove <workflow-id> <edge-id> --revision <n>
 ```
 
 数组字段只能通过 `item-add` 或 `item-remove` 一项一项修改。服务端拒绝整个数组替换。
@@ -443,10 +445,12 @@ Add sources one path at a time. Do not pass globs or multiple paths. A task with
 ## Workflow Commands
 
 ```text
-shadowencoder-cli workflow step-add <workflow-id> <kind> --revision <n>
-shadowencoder-cli workflow step-set <workflow-id> <step-id> <field> <value> --revision <n>
-shadowencoder-cli workflow step-remove <workflow-id> <step-id> --revision <n>
-shadowencoder-cli workflow step-move <workflow-id> <step-id> <after-step-id> --revision <n>
+shadowencoder-cli preset create --type workflow --name <name>
+shadowencoder-cli workflow node-add <workflow-id> <kind> --revision <n>
+shadowencoder-cli workflow node-set <workflow-id> <node-id> <field> <value> --revision <n>
+shadowencoder-cli workflow node-remove <workflow-id> <node-id> --revision <n>
+shadowencoder-cli workflow edge-add <workflow-id> <source> <source-port> <target> <target-port> --revision <n>
+shadowencoder-cli workflow edge-remove <workflow-id> <edge-id> --revision <n>
 ```
 
 Each workflow action references an existing function preset. Create or edit that preset through the preset commands first.

@@ -9,7 +9,7 @@ ffmpeg/win/ffprobe.exe
 ffmpeg/win/ffplay.exe
 ffmpeg/win/img2webp.exe
 ffmpeg/win/webpmux.exe
-ffmpeg-8.1-essentials_build/bin/
+ffmpeg-*-essentials_build/bin/
 
 # local libmpv development/runtime binaries (per-platform, not committed)
 mpv/win/

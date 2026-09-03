@@ -51,6 +51,15 @@ const CONTAINER_OPTIONS = [
   { label: 'M4V', value: 'm4v' },
 ];
 
+const AUDIO_OUTPUT_OPTIONS = [
+  { label: 'MP3', value: 'mp3' },
+  { label: 'M4A', value: 'm4a', tags: ['AAC'] },
+  { label: 'WAV', value: 'wav', tags: ['PCM'] },
+  { label: 'FLAC', value: 'flac', tags: ['无损'] },
+  { label: 'Ogg Vorbis', value: 'ogg' },
+  { label: 'Ogg Opus', value: 'opus' },
+];
+
 const VIDEO_CODEC_OPTIONS = [
   { label: '复制视频流', value: 'copy', tags: ['无重编码'], group: '通用' },
   { label: 'H.264', value: 'libx264', tags: ['CPU'], group: '软件编码' },
@@ -304,6 +313,41 @@ const AUDIO_META: Record<string, AudioMeta> = {
   wmav2: { containers: ['wmv', 'asf'] },
   copy: { containers: null },
 };
+
+const AUDIO_OUTPUT_CODECS: Record<string, string[]> = {
+  mp3: ['libmp3lame'],
+  m4a: ['aac', 'alac'],
+  wav: ['pcm_s16le', 'pcm_s24le'],
+  flac: ['flac'],
+  ogg: ['libvorbis'],
+  opus: ['libopus'],
+};
+
+function isAudioContainer(container: string): boolean {
+  return AUDIO_OUTPUT_OPTIONS.some((option) => option.value === container);
+}
+
+function isAudioOutputFormat(container: string, outputKind = ''): boolean {
+  return isAudioContainer(container) || outputKind === 'audio';
+}
+
+function outputKindForContainer(container: string): 'video' | 'audio' {
+  return isAudioContainer(container) ? 'audio' : 'video';
+}
+
+function audioOutputContainer(container: string, audioCodec: string): string {
+  if (isAudioContainer(container)) return container;
+  if (audioCodec === 'libmp3lame') return 'mp3';
+  if (audioCodec === 'flac') return 'flac';
+  if (audioCodec === 'pcm_s16le' || audioCodec === 'pcm_s24le') return 'wav';
+  if (audioCodec === 'libvorbis') return 'ogg';
+  if (audioCodec === 'libopus') return 'opus';
+  return 'm4a';
+}
+
+function formatOptions(videoCodec: string) {
+  return [...compatibleContainers(videoCodec), ...AUDIO_OUTPUT_OPTIONS];
+}
 interface PresetBuilderProps { ctx: PresetBuilderCtx; }
 
 // 根据视频编码器筛选可用封装（级联：前面选了编码器，后面只列兼容封装）
@@ -313,15 +357,27 @@ function compatibleContainers(videoCodec: string) {
   return CONTAINER_OPTIONS.filter((o) => m.containers.includes(o.value));
 }
 // 根据封装筛选可用音频编码器（copy 不限制，始终可选）
-function compatibleAudioCodecs(container: string) {
+function compatibleAudioCodecs(container: string, outputKind = outputKindForContainer(container)) {
+  if (isAudioOutputFormat(container, outputKind)) {
+    const allowed = new Set(AUDIO_OUTPUT_CODECS[container] ?? []);
+    return AUDIO_CODEC_OPTIONS.filter((option) => allowed.has(option.value));
+  }
   return AUDIO_CODEC_OPTIONS.filter((o) => {
     const a = AUDIO_META[o.value];
     return !a || !a.containers || a.containers.includes(container);
   });
 }
 
+function preferredAudioCodec(container: string, outputKind = outputKindForContainer(container), fallback = ''): string {
+  const options = compatibleAudioCodecs(container, outputKind);
+  return options.some((option) => option.value === fallback)
+    ? fallback
+    : options[0]?.value ?? '';
+}
+
 export const DEFAULT_ENCODE_FORM = {
   name: '',
+  outputKind: 'video' as 'video' | 'audio',
   container: 'mp4',
   videoCodec: 'libx264',
   videoProfile: 'high',
@@ -337,7 +393,6 @@ export const DEFAULT_ENCODE_FORM = {
   fps: 25,
   keepRes: true,
   loudnorm: true,
-  audioOnly: false,
   noAudio: false,
   audioCodec: 'aac',
   audioProfile: 'lc',
@@ -362,6 +417,7 @@ export const DEFAULT_ENCODE_FORM = {
 // 预设创建的初始表单：全部空白（不预选任何项）；空白项在套用预设时被忽略、保留运行时默认值
 const BLANK_ENCODE_FORM = {
   name: '',
+  outputKind: 'video' as 'video' | 'audio',
   container: '',
   videoCodec: '',
   videoProfile: '',
@@ -377,7 +433,6 @@ const BLANK_ENCODE_FORM = {
   fps: 0,
   keepRes: false,
   loudnorm: false,
-  audioOnly: false,
   noAudio: false,
   audioCodec: '',
   audioProfile: '',
@@ -400,6 +455,7 @@ const BLANK_ENCODE_FORM = {
 
 export function normalizeEncodeParams(params: any): any {
   const source = params && typeof params === 'object' ? params : {};
+  const { audioOnly: legacyAudioOnly, ...rest } = source;
   const legacyPost = source.deblock == null && source.style != null;
   const legacyUnsharp = [0, 0.5, 0.8, 1.2, 1.5];
   const legacyDenoise = [0, 1, 3, 6];
@@ -412,10 +468,20 @@ export function normalizeEncodeParams(params: any): any {
     ? 'original'
     : (Number(source.scaleW) > 0 && Number(source.scaleH) > 0 ? 'dimensions' : 'original'));
   const removedVideoCodec = source.videoCodec === 'gif' || source.videoCodec === 'mjpeg';
+  const container = source.container === 'gif' ? 'mp4' : source.container;
+  const outputKind = isAudioOutputFormat(
+    container,
+    source.outputKind === 'audio' || legacyAudioOnly ? 'audio' : 'video',
+  ) ? 'audio' : 'video';
+  const normalizedContainer = outputKind === 'audio'
+    ? audioOutputContainer(container, source.audioCodec)
+    : container;
   return {
-    ...source,
+    ...rest,
+    outputKind,
     videoCodec: removedVideoCodec ? 'libx264' : source.videoCodec,
-    container: source.container === 'gif' ? 'mp4' : source.container,
+    container: normalizedContainer,
+    audioCodec: preferredAudioCodec(normalizedContainer, outputKind, source.audioCodec),
     pixelFormat: removedVideoCodec ? 'yuv420p' : source.pixelFormat,
     tune,
     scaleMode,
@@ -423,7 +489,7 @@ export function normalizeEncodeParams(params: any): any {
     videoLevel: source.videoLevel || '',
     maxrate: Number(source.maxrate) || 0,
     bufsize: Number(source.bufsize) || 0,
-    noAudio: !!source.noAudio,
+    noAudio: outputKind === 'audio' ? false : !!source.noAudio,
     unsharp: legacyPost ? (legacyUnsharp[Number(source.unsharp)] ?? 0) : source.unsharp,
     denoise: legacyPost ? (legacyDenoise[Number(source.denoise)] ?? 0) : source.denoise,
     deblock: source.deblock ?? (legacyPost && Number(source.denoise) >= 2 ? 0.2 : 0),
@@ -434,6 +500,7 @@ export function normalizeEncodeParams(params: any): any {
 type SumGroup = { title: string; items: [string, string][] };
 function summarizeEncode(f: any): SumGroup[] {
   const dash = '—';
+  const isAudioOutput = isAudioOutputFormat(f.container, f.outputKind);
   const isCopy = f.videoCodec === 'copy';
   const vLabel = f.videoCodec
     ? (VIDEO_CODEC_OPTIONS.find((o) => o.value === f.videoCodec)?.label ?? f.videoCodec)
@@ -479,7 +546,7 @@ function summarizeEncode(f: any): SumGroup[] {
   const fpsText = isCopy ? '跟随源' : (f.fps > 0 ? `${f.fps} fps` : '原始帧率');
   const chMap: Record<number, string> = { 1: '单声道', 2: '立体声', 6: '5.1' };
   let audio: string;
-  if (f.audioOnly) audio = '仅输出音频';
+  if (isAudioOutput) audio = `输出 ${String(f.container || '').toUpperCase() || dash}`;
   else if (f.noAudio) audio = '不输出音轨';
   else if (!f.audioCodec) audio = dash;
   else if (f.audioCodec === 'copy') audio = '复制音频流';
@@ -490,7 +557,9 @@ function summarizeEncode(f: any): SumGroup[] {
     if (f.audioChannels) parts.push(`${chMap[f.audioChannels] ?? f.audioChannels}声道`);
     audio = parts.join(' · ');
   }
-  const videoItems: [string, string][] = isCopy
+  const videoItems: [string, string][] = isAudioOutput
+    ? [['视频流', '不输出']]
+    : isCopy
     ? [['视频编码器', '复制视频流 (copy)'], ['说明', '不重新编码，仅换封装 / 改音频']]
     : [
         ['视频编码器', vLabel],
@@ -505,8 +574,10 @@ function summarizeEncode(f: any): SumGroup[] {
   return [
     { title: '视频编码', items: videoItems },
     {
-      title: '封装格式',
-      items: [['封装格式', f.container ? String(f.container).toUpperCase() : dash]],
+      title: '输出格式',
+      items: [
+        ['格式', f.container ? String(f.container).toUpperCase() : dash],
+      ],
     },
     {
       title: '分辨率与帧率',
@@ -548,22 +619,23 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const vMeta = VIDEO_META[form.videoCodec];
+  const isAudioOutput = isAudioOutputFormat(form.container, form.outputKind);
   const isCopy = form.videoCodec === 'copy';
   const isAudioCopy = form.audioCodec === 'copy';
-  const audioDisabled = form.noAudio;
+  const audioDisabled = !isAudioOutput && form.noAudio;
   const rateModeOptions = compatibleRateModes(form.videoCodec);
   const pixelFormatOptions = compatiblePixelFormats(form.videoCodec);
   const summary = summarizeEncode(form);
 
   // 后续下拉框只列出与前面选择兼容的选项（级联筛选，不再展示"不兼容"）
-  const containerOptions = compatibleContainers(form.videoCodec);
-  const audioOptions = compatibleAudioCodecs(form.container);
+  const containerOptions = formatOptions(form.videoCodec);
+  const audioOptions = compatibleAudioCodecs(form.container, isAudioOutput ? 'audio' : 'video');
 
   // 选了视频编码器 → 已选封装若不兼容则回退（未选封装保持空白，不强行预选）
   const onVideoCodecChange = (vc: string) => {
     const m = VIDEO_META[vc];
     setForm((f) => {
-      const nextContainers = compatibleContainers(vc);
+      const nextContainers = formatOptions(vc);
       const stillOk = f.container && nextContainers.some((o) => o.value === f.container);
       const nextRateModes = compatibleRateModes(vc);
       const nextRateMode = nextRateModes.some((option) => option.value === f.rateMode)
@@ -593,12 +665,8 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
     }));
   };
 
-  const onAudioOnlyChange = (audioOnly: boolean) => {
-    setForm((f) => ({ ...f, audioOnly, noAudio: audioOnly ? false : f.noAudio }));
-  };
-
   const onNoAudioChange = (noAudio: boolean) => {
-    setForm((f) => ({ ...f, noAudio, audioOnly: noAudio ? false : f.audioOnly, loudnorm: noAudio ? false : f.loudnorm }));
+    setForm((f) => ({ ...f, noAudio, loudnorm: noAudio ? false : f.loudnorm }));
   };
 
   const onScaleModeChange = (scaleMode: string) => {
@@ -613,8 +681,14 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
   // 改了封装 → 已选音频编码器若不兼容则清空（保持空白语义，不替用户预选）
   const onContainerChange = (c: string) => {
     setForm((f) => {
-      const ok = !f.audioCodec || compatibleAudioCodecs(c).some((o) => o.value === f.audioCodec);
-      return { ...f, container: c, audioCodec: ok ? f.audioCodec : '' };
+      const outputKind = outputKindForContainer(c);
+      return {
+        ...f,
+        container: c,
+        outputKind,
+        audioCodec: preferredAudioCodec(c, outputKind, f.audioCodec),
+        noAudio: outputKind === 'audio' ? false : f.noAudio,
+      };
     });
   };
 
@@ -695,7 +769,7 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
   const abrManualDisabled = abrSel !== '__custom__';
 
   const [tab, setTab] = useState(0);
-  const TABS = ['视频编码', '封装格式', '分辨率与帧率', '音频', '后期处理', '任务设置', '输出位置'];
+  const TABS = ['视频编码', '输出格式', '分辨率与帧率', '音频', '后期处理', '任务设置', '输出位置'];
   const customResolutionRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (tab !== 2 || form.scaleMode !== 'dimensions' || resSel !== '__custom__') return undefined;
@@ -980,28 +1054,33 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
 
           <div className="se-preset-cols">
             <div className="se-preset-col">
-              {tab === 0 && (
+            {tab === 0 && (
               <div className="se-preset-tab-content">
-                <ui.AnimatedFieldGrid rows={videoFieldRows} />
-                <ui.AnimatedCollapse open={isCopy} className="se-preset-content-collapse">
-                  <ui.HintLabel>视频流将直接复制、不重新编码；仅可更改封装格式与音频参数。</ui.HintLabel>
+                <ui.AnimatedCollapse open={!isAudioOutput} className="se-preset-content-collapse">
+                  <ui.AnimatedFieldGrid rows={videoFieldRows} />
+                  <ui.AnimatedCollapse open={isCopy} className="se-preset-content-collapse">
+                    <ui.HintLabel>视频流将直接复制、不重新编码；仅可更改封装格式与音频参数。</ui.HintLabel>
+                  </ui.AnimatedCollapse>
+                </ui.AnimatedCollapse>
+                <ui.AnimatedCollapse open={isAudioOutput} className="se-preset-content-collapse">
+                  <ui.HintLabel>音频输出不使用视频编码设置。</ui.HintLabel>
                 </ui.AnimatedCollapse>
               </div>
             )}
 
             {tab === 1 && (
               <ui.FieldGrid>
-                <ui.FieldLabel>封装格式</ui.FieldLabel>
+                <ui.FieldLabel>输出格式</ui.FieldLabel>
                 <ui.ComboBox value={form.container} options={containerOptions} onChange={onContainerChange} />
               </ui.FieldGrid>
             )}
 
             {tab === 2 && (
               <div className="se-preset-tab-content">
-                <ui.AnimatedCollapse open={isCopy} className="se-preset-content-collapse">
+                <ui.AnimatedCollapse open={isCopy || isAudioOutput} className="se-preset-content-collapse">
                   <ui.HintLabel>视频流复制模式下无法缩放或更改帧率，输出跟随源视频。</ui.HintLabel>
                 </ui.AnimatedCollapse>
-                <ui.AnimatedCollapse open={!isCopy} className="se-preset-content-collapse">
+                <ui.AnimatedCollapse open={!isCopy && !isAudioOutput} className="se-preset-content-collapse">
                   <ui.FieldGrid>
                     <ui.FieldLabel>缩放方式</ui.FieldLabel>
                     <ui.ComboBox value={form.scaleMode || ''} options={SCALE_MODE_OPTIONS} onChange={onScaleModeChange} />
@@ -1039,15 +1118,14 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
                 </ui.AnimatedCollapse>
                 <div className="se-option-stack">
                   <ui.Checkbox checked={form.loudnorm} disabled={audioDisabled || isAudioCopy} onChange={(v) => set('loudnorm', v)}>启用音频标准化</ui.Checkbox>
-                  <ui.Checkbox checked={!!form.audioOnly} onChange={onAudioOnlyChange}>只输出音频</ui.Checkbox>
-                  <ui.Checkbox checked={!!form.noAudio} onChange={onNoAudioChange}>不输出音轨</ui.Checkbox>
+                  {!isAudioOutput && <ui.Checkbox checked={!!form.noAudio} onChange={onNoAudioChange}>不输出音轨</ui.Checkbox>}
                 </div>
               </div>
             )}
 
             {tab === 4 && (
               <div className="se-preset-tab-content">
-                <ui.AnimatedCollapse open={!isCopy} className="se-preset-content-collapse">
+                <ui.AnimatedCollapse open={!isCopy && !isAudioOutput} className="se-preset-content-collapse">
                   <ui.FieldGrid>
                     <ui.FieldLabel>锐化</ui.FieldLabel>
                     <ui.NumberField value={Number(form.unsharp) || 0} min={0} max={1.5} step={0.1} decimals={1} onChange={(v) => set('unsharp', v)} />
@@ -1057,7 +1135,7 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
                     <ui.NumberField value={Number(form.deblock) || 0} min={0} max={1} step={0.05} decimals={2} onChange={(v) => set('deblock', v)} />
                   </ui.FieldGrid>
                 </ui.AnimatedCollapse>
-                <ui.AnimatedCollapse open={isCopy} className="se-preset-content-collapse">
+                <ui.AnimatedCollapse open={isCopy || isAudioOutput} className="se-preset-content-collapse">
                   <ui.HintLabel>视频流复制模式下滤镜（锐化 / 降噪 / 去块）不可用。</ui.HintLabel>
                 </ui.AnimatedCollapse>
               </div>
@@ -1065,13 +1143,13 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
 
             {tab === 5 && (
               <div className="se-preset-tab-content">
-                <ui.Checkbox
+                {!isAudioOutput && <ui.Checkbox
                   checked={!!form.twoPass}
                   disabled={!canUseTwoPass(form.videoCodec, form.rateMode)}
                   onChange={(v) => set('twoPass', v)}
                 >
                   启用 2-pass 编码（固定码率 / 目标体积）
-                </ui.Checkbox>
+                </ui.Checkbox>}
                 <ui.Checkbox checked={form.previewDuringEncode} onChange={(v) => set('previewDuringEncode', v)}>
                   编码时跟随当前素材
                 </ui.Checkbox>
@@ -1081,7 +1159,7 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
               <OutputLocationFields
                 value={form}
                 presetName={form.name}
-                extension={form.container || 'mp4'}
+                extension={form.container || (isAudioOutput ? 'm4a' : 'mp4')}
                 encodeLabels={buildEncodeNameLabels({
                   scaleW: form.scaleW,
                   scaleH: form.scaleH,
@@ -1126,18 +1204,19 @@ function PresetBuilder({ ctx }: PresetBuilderProps) {
 // 复用模块级编码选项常量与级联筛选逻辑，与「管理预设」弹窗保持一致
 function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) => void }) {
   const vMeta = VIDEO_META[form.videoCodec];
+  const isAudioOutput = isAudioOutputFormat(form.container, form.outputKind);
   const isCopy = form.videoCodec === 'copy';
   const isAudioCopy = form.audioCodec === 'copy';
-  const audioDisabled = form.noAudio;
-  const containerOptions = compatibleContainers(form.videoCodec);
-  const audioOptions = compatibleAudioCodecs(form.container);
+  const audioDisabled = !isAudioOutput && form.noAudio;
+  const containerOptions = formatOptions(form.videoCodec);
+  const audioOptions = compatibleAudioCodecs(form.container, isAudioOutput ? 'audio' : 'video');
   const rateModeOptions = compatibleRateModes(form.videoCodec);
   const pixelFormatOptions = compatiblePixelFormats(form.videoCodec);
   const qualityLabel = '质量';
 
   const onVideoCodecChange = (vc: string) => {
     const m = VIDEO_META[vc];
-    const nextContainers = compatibleContainers(vc);
+    const nextContainers = formatOptions(vc);
     const stillOk = form.container && nextContainers.some((o) => o.value === form.container);
     const nextRateModes = compatibleRateModes(vc);
     const nextRateMode = nextRateModes.some((option) => option.value === form.rateMode)
@@ -1159,18 +1238,15 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
     if (!canUseTwoPass(form.videoCodec, rateMode)) set('twoPass', false);
   };
   const onContainerChange = (c: string) => {
-    const ok = !form.audioCodec || compatibleAudioCodecs(c).some((o) => o.value === form.audioCodec);
+    const outputKind = outputKindForContainer(c);
     set('container', c);
-    set('audioCodec', ok ? form.audioCodec : '');
-  };
-  const onAudioOnlyChange = (audioOnly: boolean) => {
-    set('audioOnly', audioOnly);
-    if (audioOnly) set('noAudio', false);
+    set('outputKind', outputKind);
+    set('audioCodec', preferredAudioCodec(c, outputKind, form.audioCodec));
+    if (outputKind === 'audio') set('noAudio', false);
   };
   const onNoAudioChange = (noAudio: boolean) => {
     set('noAudio', noAudio);
     if (noAudio) {
-      set('audioOnly', false);
       set('loudnorm', false);
     }
   };
@@ -1366,21 +1442,21 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
 
   return (
     <>
-      <ui.ParamGroup title="视频编码">
+      {!isAudioOutput && <ui.ParamGroup title="视频编码">
         <ui.AnimatedFieldGrid rows={videoFieldRows} />
         <ui.AnimatedCollapse open={isCopy} className="se-panel-collapse">
           <ui.HintLabel>视频流将直接复制、不重新编码；仅可更改封装格式与音频参数。</ui.HintLabel>
         </ui.AnimatedCollapse>
-      </ui.ParamGroup>
+      </ui.ParamGroup>}
 
-      <ui.ParamGroup title="封装格式">
+      <ui.ParamGroup title="输出格式">
         <ui.FieldGrid>
-          <ui.FieldLabel>封装格式</ui.FieldLabel>
+          <ui.FieldLabel>格式</ui.FieldLabel>
           <ui.ComboBox value={form.container} options={containerOptions} onChange={onContainerChange} />
         </ui.FieldGrid>
       </ui.ParamGroup>
 
-      <ui.ParamGroup title="分辨率与帧率">
+      {!isAudioOutput && <ui.ParamGroup title="分辨率与帧率">
         <ui.AnimatedCollapse open={!isCopy} className="se-panel-collapse">
           <ui.FieldGrid>
             <ui.FieldLabel>缩放方式</ui.FieldLabel>
@@ -1404,7 +1480,7 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
         <ui.AnimatedCollapse open={isCopy} className="se-panel-collapse">
           <ui.HintLabel>视频流复制模式下无法缩放或更改帧率，输出跟随源视频。</ui.HintLabel>
         </ui.AnimatedCollapse>
-      </ui.ParamGroup>
+      </ui.ParamGroup>}
 
       <ui.ParamGroup title="音频">
         <ui.AnimatedCollapse open={!audioDisabled} className="se-panel-collapse">
@@ -1412,12 +1488,11 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
         </ui.AnimatedCollapse>
         <div className="se-option-stack">
           <ui.Checkbox checked={form.loudnorm} disabled={audioDisabled || isAudioCopy} onChange={(v) => set('loudnorm', v)}>启用音频标准化</ui.Checkbox>
-          <ui.Checkbox checked={!!form.audioOnly} onChange={onAudioOnlyChange}>只输出音频</ui.Checkbox>
-          <ui.Checkbox checked={!!form.noAudio} onChange={onNoAudioChange}>不输出音轨</ui.Checkbox>
+          {!isAudioOutput && <ui.Checkbox checked={!!form.noAudio} onChange={onNoAudioChange}>不输出音轨</ui.Checkbox>}
         </div>
       </ui.ParamGroup>
 
-      <ui.ParamGroup title="后期处理">
+      {!isAudioOutput && <ui.ParamGroup title="后期处理">
         <ui.AnimatedCollapse open={!isCopy} className="se-panel-collapse">
           <ui.FieldGrid>
             <ui.FieldLabel>锐化</ui.FieldLabel>
@@ -1431,16 +1506,16 @@ function EncodeInlineForm({ form, set }: { form: any; set: (k: string, v: any) =
         <ui.AnimatedCollapse open={isCopy} className="se-panel-collapse">
           <ui.HintLabel>视频流复制模式下滤镜（锐化 / 降噪 / 去块）不可用。</ui.HintLabel>
         </ui.AnimatedCollapse>
-      </ui.ParamGroup>
+      </ui.ParamGroup>}
 
       <ui.ParamGroup title="任务设置">
-        <ui.Checkbox
+        {!isAudioOutput && <ui.Checkbox
           checked={!!form.twoPass}
           disabled={!canUseTwoPass(form.videoCodec, form.rateMode)}
           onChange={(v) => set('twoPass', v)}
         >
           启用 2-pass 编码（固定码率 / 目标体积）
-        </ui.Checkbox>
+        </ui.Checkbox>}
         <ui.Checkbox checked={form.previewDuringEncode} onChange={(v) => set('previewDuringEncode', v)}>
           编码时跟随当前素材
         </ui.Checkbox>
@@ -1710,9 +1785,14 @@ export function ToolWorkspace({ params, actions, result, resultHeader, resultTit
   resultTitle?: ReactNode;
   taskFailure?: { message: string; logs: TaskLogEvent[]; onClose: () => void };
 }) {
-  const { wParams, resizeParams } = useColumnLayout();
+  const { wParams, setWParams } = useColumnLayout();
   const task = useTaskRunner();
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const resizeParams = useCallback((dx: number) => {
+    const maxWidth = Math.max(0, (workspaceRef.current?.clientWidth ?? 0) - 1);
+    setWParams((width) => Math.max(0, Math.min(maxWidth, width + dx)));
+  }, [setWParams]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -1757,7 +1837,7 @@ export function ToolWorkspace({ params, actions, result, resultHeader, resultTit
   }, []);
 
   return (
-    <div className="se-tab-workspace">
+    <div ref={workspaceRef} className="se-tab-workspace">
       <div className="se-left" style={{ flex: `0 0 ${wParams}px`, width: wParams, minWidth: wParams }}>
         <div ref={scrollRef} className="se-params-scroll">{params}</div>
         {actions && <div className="se-params-foot">{actions}</div>}
@@ -2070,7 +2150,7 @@ export function EncodeTab() {
   const [presetName, setPresetName] = useState('');
   const previewPath = t.progressSource;
   const previewName = previewPath.split(/[/\\]/).filter(Boolean).pop() ?? '';
-  const media = useActiveMedia((form.previewDuringEncode && previewPath) || fl.activePath, false);
+  const media = useActiveMedia((t.running && form.previewDuringEncode && previewPath) || fl.activePath, false);
 
   // 面板内联控件直接改 form（无需先建预设）
   const setField = (k: string, v: any) => setForm((f) => ({ ...f, [k]: v }));
@@ -2101,15 +2181,18 @@ export function EncodeTab() {
   });
 
   const runPaths = (targets: string[]) => t.start(async () => {
+    let resolvedFileCount = targets.length;
     try {
+      const outputKind = isAudioOutputFormat(form.container, form.outputKind) ? 'audio' : 'video';
       const files = await resolveTaskMediaFiles(
         fl.resolveLeafPaths,
         targets,
-        form.audioOnly ? isAudioVisualPath : isVideoPath,
+        outputKind === 'audio' ? isAudioVisualPath : isVideoPath,
         t.appendLog,
       );
+      resolvedFileCount = files.length;
       if (files.length === 0) return;
-      const outputs = await transcode({
+      const result = await transcode({
         paths: files,
         videoCodec: form.videoCodec,
         videoProfile: form.videoProfile,
@@ -2137,7 +2220,7 @@ export function EncodeTab() {
         denoise: form.denoise,
         deblock: form.deblock,
         loudnorm: form.loudnorm,
-        audioOnly: form.audioOnly,
+        outputKind,
         noAudio: form.noAudio,
         keepRes: form.keepRes,
         rateMode: form.rateMode || 'crf',
@@ -2146,11 +2229,11 @@ export function EncodeTab() {
         // 命名标签由后端按每文件实际参数探测/生成，前端标签仅用于预览
         outputOptions: toOutputSettings(form, presetName),
       });
-      t.setOutputPaths(outputs);
-      t.setPass(files.length);
-      t.setFail(0);
+      t.setOutputPaths(result.outputPaths);
+      t.setPass(result.completed);
+      t.setFail(result.failed);
     } catch (e) {
-      t.setFail(targets.length);
+      t.setFail(resolvedFileCount);
       throw e;
     }
   });
@@ -2164,14 +2247,15 @@ export function EncodeTab() {
       'encode',
     );
     const agentForm: any = { ...DEFAULT_ENCODE_FORM, ...normalizeEncodeParams(preset.params) };
+    const outputKind = isAudioOutputFormat(agentForm.container, agentForm.outputKind) ? 'audio' : 'video';
     const files = await resolveTaskMediaFiles(
       fl.resolveLeafPaths,
       agentTask.inputPaths,
-      agentForm.audioOnly ? isAudioVisualPath : isVideoPath,
+      outputKind === 'audio' ? isAudioVisualPath : isVideoPath,
       t.appendLog,
     );
     if (files.length === 0) return { outputPaths: [], detail: '没有需要转码的受支持媒体文件' };
-    const outputs = await transcode({
+    const result = await transcode({
       paths: files,
       videoCodec: agentForm.videoCodec,
       videoProfile: agentForm.videoProfile,
@@ -2199,7 +2283,7 @@ export function EncodeTab() {
       denoise: agentForm.denoise,
       deblock: agentForm.deblock,
       loudnorm: agentForm.loudnorm,
-      audioOnly: agentForm.audioOnly,
+      outputKind,
       noAudio: agentForm.noAudio,
       keepRes: agentForm.keepRes,
       rateMode: agentForm.rateMode || 'crf',
@@ -2210,10 +2294,13 @@ export function EncodeTab() {
         uniqueName: true,
       },
     });
-    t.setOutputPaths(outputs);
-    t.setPass(files.length);
-    t.setFail(0);
-    return { outputPaths: outputs, detail: `转码完成 ${outputs.length} 个文件` };
+    t.setOutputPaths(result.outputPaths);
+    t.setPass(result.completed);
+    t.setFail(result.failed);
+    return {
+      outputPaths: result.outputPaths,
+      detail: `转码完成 ${result.completed} 个文件${result.failed > 0 ? `，失败 ${result.failed} 个` : ''}`,
+    };
   })), [fl.resolveLeafPaths, t.appendLog, t.setFail, t.setOutputPaths, t.setPass, t.start]);
 
   return (
@@ -2226,7 +2313,7 @@ export function EncodeTab() {
           <OutputLocationGroup
             value={form}
             presetName={presetName}
-            extension={form.container || 'mp4'}
+            extension={form.container || (isAudioOutputFormat(form.container, form.outputKind) ? 'm4a' : 'mp4')}
             encodeLabels={encodeLabels}
             onChange={setField}
             disabled={t.running}

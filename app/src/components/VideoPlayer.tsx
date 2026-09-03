@@ -1,6 +1,6 @@
 // ShadowEncoder 统一播放器 —— 复刻原 CvPlayer 交互（性能：按需绘制，不整文件进内存）
 import React, {
-  forwardRef, useImperativeHandle, useRef, useState, useEffect, useLayoutEffect, useCallback,
+  createContext, forwardRef, useContext, useImperativeHandle, useRef, useState, useEffect, useLayoutEffect, useCallback,
 } from 'react';
 import {
   isTauriRuntime,
@@ -265,7 +265,7 @@ function cropFromResize(
   return { x: left, y: top, w, h };
 }
 
-const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
+const VideoPlayerImpl = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
   const [mpvPlayerId] = useState(() => SHARED_NATIVE_PLAYER_ID);
   const modalLayerOpen = useModalLayerOpen();
   const { accentColor, colorScheme } = useAppTheme();
@@ -1873,6 +1873,18 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => {
     </div>
   );
 });
+
+VideoPlayerImpl.displayName = 'VideoPlayerImpl';
+
+const VideoPlayerVisibleContext = createContext(true);
+
+export function VideoPlayerVisibilityProvider({ active, children }: { active: boolean; children: React.ReactNode }) {
+  return <VideoPlayerVisibleContext.Provider value={active}>{children}</VideoPlayerVisibleContext.Provider>;
+}
+
+const VideoPlayer = forwardRef<VideoPlayerHandle, Props>((props, ref) => (
+  useContext(VideoPlayerVisibleContext) ? <VideoPlayerImpl {...props} ref={ref} /> : null
+));
 
 VideoPlayer.displayName = 'VideoPlayer';
 export default VideoPlayer;

@@ -558,34 +558,38 @@ fn dispatch(
             selected_source_paths,
             active_path.clone(),
         ),
-        AgentCommand::WorkflowStepAdd {
+        AgentCommand::WorkflowNodeAdd { workflow_id, kind } => {
+            workflow_node_add(state, request, workflow_id, kind)
+        }
+        AgentCommand::WorkflowNodeSet {
             workflow_id,
-            kind,
-            parent_id,
-            branch,
-        } => workflow_step_add(
+            node_id,
+            field,
+            value,
+        } => workflow_node_set(state, request, workflow_id, node_id, field, value.clone()),
+        AgentCommand::WorkflowNodeRemove {
+            workflow_id,
+            node_id,
+        } => workflow_node_remove(state, request, workflow_id, node_id),
+        AgentCommand::WorkflowEdgeAdd {
+            workflow_id,
+            source,
+            source_port,
+            target,
+            target_port,
+        } => workflow_edge_add(
             state,
             request,
             workflow_id,
-            kind,
-            parent_id.as_deref(),
-            branch.as_deref(),
+            source,
+            source_port,
+            target,
+            target_port,
         ),
-        AgentCommand::WorkflowStepSet {
+        AgentCommand::WorkflowEdgeRemove {
             workflow_id,
-            step_id,
-            field,
-            value,
-        } => workflow_step_set(state, request, workflow_id, step_id, field, value.clone()),
-        AgentCommand::WorkflowStepRemove {
-            workflow_id,
-            step_id,
-        } => workflow_step_remove(state, request, workflow_id, step_id),
-        AgentCommand::WorkflowStepMove {
-            workflow_id,
-            step_id,
-            after_step_id,
-        } => workflow_step_move(state, request, workflow_id, step_id, after_step_id),
+            edge_id,
+        } => workflow_edge_remove(state, request, workflow_id, edge_id),
         AgentCommand::TaskList => Ok(DispatchOutcome::Read(json!(state.tasks))),
         AgentCommand::TaskShow { task_id } => {
             Ok(DispatchOutcome::Read(json!(find_task(state, task_id)?)))
@@ -1114,9 +1118,13 @@ fn default_preset_params(preset_type: &str) -> Value {
                 "kind": "manual",
                 "volumeKind": "removable",
                 "labelContains": "",
-                "settleSeconds": 2
+                "settleSeconds": 3
             },
-            "steps": []
+            "graph": {
+                "startPosition": { "x": 0, "y": 68 },
+                "nodes": [],
+                "edges": []
+            }
         }),
         _ => json!({}),
     }
@@ -1438,124 +1446,162 @@ fn path_belongs_to(path: &str, root: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with(separator))
 }
 
-fn workflow_step_add(
+const WORKFLOW_START_ID: &str = "__workflow_start__";
+
+fn workflow_node_add(
     state: &mut StoredState,
     request: &AgentRequest,
     workflow_id: &str,
     kind: &str,
-    parent_id: Option<&str>,
-    branch: Option<&str>,
 ) -> Result<DispatchOutcome, ServiceFailure> {
     ensure_actor(request, &[Actor::Agent])?;
-    if parent_id.is_some() != branch.is_some() {
-        return Err(ServiceFailure::validation(
-            "--parent 与 --branch 必须同时提供",
-        ));
-    }
-    if branch.is_some_and(|value| !matches!(value, "then" | "else")) {
-        return Err(ServiceFailure::validation("branch 只能是 then 或 else"));
-    }
-    let node = create_workflow_node(kind)?;
-    let node_id = node
-        .get("id")
-        .and_then(Value::as_str)
-        .expect("generated workflow node has id")
-        .to_string();
-    mutate_workflow(state, request, workflow_id, "workflow.step_add", |params| {
-        let steps = workflow_branch_mut(params, parent_id, branch)?;
-        steps.push(node);
+    let node_id = new_id("workflow_node");
+    mutate_workflow(state, request, workflow_id, "workflow.node_add", |params| {
+        let nodes = workflow_graph_nodes_mut(params)?;
+        let node = create_workflow_graph_node(&node_id, kind, nodes.len())?;
+        nodes.push(node);
         Ok((
-            format!("workflow/{workflow_id}/step/{node_id}"),
-            format!("添加流程步骤 {kind}"),
-            json!({ "stepId": node_id }),
+            format!("workflow/{workflow_id}/node/{node_id}"),
+            format!("添加流程节点 {kind}"),
+            json!({ "nodeId": node_id }),
         ))
     })
 }
 
-fn workflow_step_set(
+fn workflow_node_set(
     state: &mut StoredState,
     request: &AgentRequest,
     workflow_id: &str,
-    step_id: &str,
+    node_id: &str,
     field: &str,
     value: Value,
 ) -> Result<DispatchOutcome, ServiceFailure> {
     ensure_actor(request, &[Actor::Agent])?;
     if value.is_array() || value.is_object() || value.is_null() {
         return Err(ServiceFailure::validation(
-            "流程步骤一次只能修改一个标量字段",
+            "流程节点一次只能修改一个标量字段",
         ));
     }
-    mutate_workflow(state, request, workflow_id, "workflow.step_set", |params| {
-        let steps = workflow_root_steps_mut(params)?;
-        let node = find_workflow_node_mut(steps, step_id).ok_or_else(|| {
-            ServiceFailure::new(error_code::NOT_FOUND, format!("不存在流程步骤: {step_id}"))
-        })?;
-        validate_and_set_workflow_node_field(node, field, value.clone())?;
+    mutate_workflow(state, request, workflow_id, "workflow.node_set", |params| {
+        if node_id == WORKFLOW_START_ID {
+            set_workflow_start_position(params, field, value.clone())?;
+        } else {
+            let node = workflow_graph_nodes_mut(params)?
+                .iter_mut()
+                .find(|node| node.get("id").and_then(Value::as_str) == Some(node_id))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    ServiceFailure::new(error_code::NOT_FOUND, format!("不存在流程节点: {node_id}"))
+                })?;
+            validate_and_set_workflow_graph_node_field(node, field, value.clone())?;
+            validate_workflow_graph_structure(params, false)?;
+        }
         Ok((
-            format!("workflow/{workflow_id}/step/{step_id}/{field}"),
-            format!("修改流程步骤字段 {field}"),
-            json!({ "stepId": step_id, "field": field, "value": value }),
+            format!("workflow/{workflow_id}/node/{node_id}/{field}"),
+            format!("修改流程节点字段 {field}"),
+            json!({ "nodeId": node_id, "field": field, "value": value }),
         ))
     })
 }
 
-fn workflow_step_remove(
+fn workflow_node_remove(
     state: &mut StoredState,
     request: &AgentRequest,
     workflow_id: &str,
-    step_id: &str,
+    node_id: &str,
 ) -> Result<DispatchOutcome, ServiceFailure> {
     ensure_actor(request, &[Actor::Agent])?;
+    if node_id == WORKFLOW_START_ID {
+        return Err(ServiceFailure::validation("输入节点不能删除"));
+    }
     mutate_workflow(
         state,
         request,
         workflow_id,
-        "workflow.step_remove",
+        "workflow.node_remove",
         |params| {
-            let steps = workflow_root_steps_mut(params)?;
-            if !remove_workflow_node(steps, step_id) {
-                return Err(ServiceFailure::new(
-                    error_code::NOT_FOUND,
-                    format!("不存在流程步骤: {step_id}"),
-                ));
-            }
+            let graph = workflow_graph_mut(params)?;
+            let nodes = graph
+                .get_mut("nodes")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| ServiceFailure::validation("流程 graph.nodes 结构无效"))?;
+            let index = nodes
+                .iter()
+                .position(|node| node.get("id").and_then(Value::as_str) == Some(node_id))
+                .ok_or_else(|| {
+                    ServiceFailure::new(error_code::NOT_FOUND, format!("不存在流程节点: {node_id}"))
+                })?;
+            nodes.remove(index);
+            graph
+                .get_mut("edges")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| ServiceFailure::validation("流程 graph.edges 结构无效"))?
+                .retain(|edge| {
+                    edge.get("source").and_then(Value::as_str) != Some(node_id)
+                        && edge.get("target").and_then(Value::as_str) != Some(node_id)
+                });
             Ok((
-                format!("workflow/{workflow_id}/step/{step_id}"),
-                "移除流程步骤".into(),
-                json!({ "removedStepId": step_id }),
+                format!("workflow/{workflow_id}/node/{node_id}"),
+                "移除流程节点".into(),
+                json!({ "removedNodeId": node_id }),
             ))
         },
     )
 }
 
-fn workflow_step_move(
+fn workflow_edge_add(
     state: &mut StoredState,
     request: &AgentRequest,
     workflow_id: &str,
-    step_id: &str,
-    after_step_id: &str,
+    source: &str,
+    source_port: &str,
+    target: &str,
+    target_port: &str,
 ) -> Result<DispatchOutcome, ServiceFailure> {
     ensure_actor(request, &[Actor::Agent])?;
-    if step_id == after_step_id {
-        return Err(ServiceFailure::validation("步骤不能移动到自己之后"));
-    }
+    let edge_id = new_id("workflow_edge");
+    mutate_workflow(state, request, workflow_id, "workflow.edge_add", |params| {
+        validate_workflow_connection(params, source, source_port, target, target_port)?;
+        workflow_graph_edges_mut(params)?.push(json!({
+            "id": edge_id,
+            "source": source,
+            "sourcePort": source_port,
+            "target": target,
+            "targetPort": target_port
+        }));
+        Ok((
+            format!("workflow/{workflow_id}/edge/{edge_id}"),
+            "添加流程连线".into(),
+            json!({ "edgeId": edge_id }),
+        ))
+    })
+}
+
+fn workflow_edge_remove(
+    state: &mut StoredState,
+    request: &AgentRequest,
+    workflow_id: &str,
+    edge_id: &str,
+) -> Result<DispatchOutcome, ServiceFailure> {
+    ensure_actor(request, &[Actor::Agent])?;
     mutate_workflow(
         state,
         request,
         workflow_id,
-        "workflow.step_move",
+        "workflow.edge_remove",
         |params| {
-            let steps = workflow_root_steps_mut(params)?;
-            if !move_workflow_node_in_same_list(steps, step_id, after_step_id) {
-                return Err(ServiceFailure::validation(
-                    "只能在同一分支内移动步骤；使用 - 表示移动到分支开头",
-                ));
-            }
+            let edges = workflow_graph_edges_mut(params)?;
+            let index = edges
+                .iter()
+                .position(|edge| edge.get("id").and_then(Value::as_str) == Some(edge_id))
+                .ok_or_else(|| {
+                    ServiceFailure::new(error_code::NOT_FOUND, format!("不存在流程连线: {edge_id}"))
+                })?;
+            edges.remove(index);
             Ok((
-                format!("workflow/{workflow_id}/step/{step_id}"),
-                "调整流程步骤顺序".into(),
-                json!({ "stepId": step_id, "afterStepId": after_step_id }),
+                format!("workflow/{workflow_id}/edge/{edge_id}"),
+                "移除流程连线".into(),
+                json!({ "removedEdgeId": edge_id }),
             ))
         },
     )
@@ -1605,45 +1651,45 @@ where
     }))
 }
 
-fn create_workflow_node(kind: &str) -> Result<Value, ServiceFailure> {
-    let id = new_id("step");
-    if matches!(kind, "backup" | "transcode" | "mix" | "check") {
-        return Ok(json!({
-            "id": id,
-            "type": "action",
-            "kind": kind,
-            "presetId": "",
-            "presetRevision": 0,
-            "failureMode": "stop"
-        }));
-    }
-    let condition_kind = kind
-        .strip_prefix("condition:")
-        .unwrap_or("source_has_media");
-    if kind != "condition"
-        && !matches!(
-            condition_kind,
-            "source_has_media"
-                | "backup_destinations_fit"
-                | "last_step_succeeded"
-                | "last_backup_verified"
-        )
-    {
-        return Err(ServiceFailure::validation(format!(
-            "未知流程步骤类型: {kind}"
-        )));
-    }
-    Ok(json!({
-        "id": id,
-        "type": "condition",
-        "condition": {
-            "kind": condition_kind,
-            "backupPresetId": "",
-            "reservePercent": 10
-        },
-        "thenSteps": [],
-        "elseSteps": []
-    }))
+fn create_workflow_graph_node(id: &str, kind: &str, index: usize) -> Result<Value, ServiceFailure> {
+    let position = json!({
+        "x": 280 + (index % 3) * 300,
+        "y": 80 + (index / 3) * 180
+    });
+    let node = match kind {
+        "backup" | "transcode" | "mix" | "check" => json!({
+            "id": id, "type": "action", "kind": kind,
+            "presetId": "", "presetRevision": 1, "position": position
+        }),
+        "filter" => json!({
+            "id": id, "type": "filter",
+            "filter": { "mediaKind": "all", "nameIncludes": "" },
+            "position": position
+        }),
+        "long_edge" | "frame_rate" | "list_index" | "reverse_index" => json!({
+            "id": id, "type": "probe", "metric": kind, "position": position
+        }),
+        "count" | "math" | "compare" | "boolean" => json!({
+            "id": id, "type": "logic",
+            "logic": {
+                "kind": kind, "value": 3000, "mathOperator": "add",
+                "compareOperator": "gt", "booleanOperator": "and"
+            },
+            "position": position
+        }),
+        "gate" => json!({ "id": id, "type": "gate", "position": position }),
+        "output" => json!({
+            "id": id, "type": "output",
+            "output": { "mode": "collect", "directory": "", "writeLog": false },
+            "position": position
+        }),
+        _ => {
+            return Err(ServiceFailure::validation(format!(
+                "未知流程节点类型: {kind}"
+            )))
+        }
+    };
+    Ok(node)
 }
 
 fn ensure_workflow_shape(params: &mut Value) -> Result<(), ServiceFailure> {
@@ -1655,117 +1701,102 @@ fn ensure_workflow_shape(params: &mut Value) -> Result<(), ServiceFailure> {
             "kind": "manual",
             "volumeKind": "removable",
             "labelContains": "",
-            "settleSeconds": 2
+            "settleSeconds": 3
         })
     });
-    object
-        .entry("steps")
-        .or_insert_with(|| Value::Array(Vec::new()));
+    object.entry("graph").or_insert_with(|| {
+        json!({
+            "startPosition": { "x": 0, "y": 68 },
+            "nodes": [],
+            "edges": []
+        })
+    });
     if !object.get("trigger").is_some_and(Value::is_object)
-        || !object.get("steps").is_some_and(Value::is_array)
+        || !object.get("graph").is_some_and(Value::is_object)
     {
-        return Err(ServiceFailure::validation("流程 trigger 或 steps 结构无效"));
+        return Err(ServiceFailure::validation("流程 trigger 或 graph 结构无效"));
+    }
+    let graph = object.get_mut("graph").unwrap().as_object_mut().unwrap();
+    graph
+        .entry("startPosition")
+        .or_insert_with(|| json!({ "x": 0, "y": 68 }));
+    graph
+        .entry("nodes")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    graph
+        .entry("edges")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !graph.get("startPosition").is_some_and(Value::is_object)
+        || !graph.get("nodes").is_some_and(Value::is_array)
+        || !graph.get("edges").is_some_and(Value::is_array)
+    {
+        return Err(ServiceFailure::validation("流程 graph 结构无效"));
     }
     Ok(())
 }
 
-fn workflow_root_steps_mut(params: &mut Value) -> Result<&mut Vec<Value>, ServiceFailure> {
+fn workflow_graph_mut(params: &mut Value) -> Result<&mut Map<String, Value>, ServiceFailure> {
     ensure_workflow_shape(params)?;
     params
-        .get_mut("steps")
+        .get_mut("graph")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| ServiceFailure::validation("流程 graph 结构无效"))
+}
+
+fn workflow_graph_nodes_mut(params: &mut Value) -> Result<&mut Vec<Value>, ServiceFailure> {
+    workflow_graph_mut(params)?
+        .get_mut("nodes")
         .and_then(Value::as_array_mut)
-        .ok_or_else(|| ServiceFailure::validation("流程 steps 结构无效"))
+        .ok_or_else(|| ServiceFailure::validation("流程 graph.nodes 结构无效"))
 }
 
-fn workflow_branch_mut<'a>(
-    params: &'a mut Value,
-    parent_id: Option<&str>,
-    branch: Option<&str>,
-) -> Result<&'a mut Vec<Value>, ServiceFailure> {
-    let steps = workflow_root_steps_mut(params)?;
-    let Some(parent_id) = parent_id else {
-        return Ok(steps);
-    };
-    let parent = find_workflow_node_mut(steps, parent_id).ok_or_else(|| {
-        ServiceFailure::new(
-            error_code::NOT_FOUND,
-            format!("不存在父条件步骤: {parent_id}"),
-        )
-    })?;
-    if parent.get("type").and_then(Value::as_str) != Some("condition") {
-        return Err(ServiceFailure::validation("父步骤不是条件节点"));
-    }
-    let key = if branch == Some("then") {
-        "thenSteps"
-    } else {
-        "elseSteps"
-    };
-    parent
-        .entry(key)
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .ok_or_else(|| ServiceFailure::validation("条件分支结构无效"))
+fn workflow_graph_edges_mut(params: &mut Value) -> Result<&mut Vec<Value>, ServiceFailure> {
+    workflow_graph_mut(params)?
+        .get_mut("edges")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ServiceFailure::validation("流程 graph.edges 结构无效"))
 }
 
-fn find_workflow_node_mut<'a>(
-    nodes: &'a mut Vec<Value>,
-    step_id: &str,
-) -> Option<&'a mut Map<String, Value>> {
-    let path = find_workflow_node_path(nodes, step_id)?;
-    workflow_node_at_path_mut(nodes, &path)
+fn set_workflow_start_position(
+    params: &mut Value,
+    field: &str,
+    value: Value,
+) -> Result<(), ServiceFailure> {
+    let coordinate = field
+        .strip_prefix("position.")
+        .filter(|coordinate| matches!(*coordinate, "x" | "y"))
+        .ok_or_else(|| ServiceFailure::validation("输入节点只支持 position.x 或 position.y"))?;
+    let number = value
+        .as_f64()
+        .filter(|number| number.is_finite() && (-10000.0..=10000.0).contains(number))
+        .ok_or_else(|| ServiceFailure::validation("节点位置必须在 -10000 到 10000 之间"))?;
+    workflow_graph_mut(params)?
+        .get_mut("startPosition")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| ServiceFailure::validation("输入节点位置结构无效"))?
+        .insert(coordinate.into(), json!(number));
+    Ok(())
 }
 
-fn find_workflow_node_path(
-    nodes: &[Value],
-    step_id: &str,
-) -> Option<Vec<(usize, Option<&'static str>)>> {
-    for (index, node) in nodes.iter().enumerate() {
-        if node.get("id").and_then(Value::as_str) == Some(step_id) {
-            return Some(vec![(index, None)]);
-        }
-        if node.get("type").and_then(Value::as_str) != Some("condition") {
-            continue;
-        }
-        for key in ["thenSteps", "elseSteps"] {
-            let children = node.get(key).and_then(Value::as_array)?;
-            if let Some(mut child_path) = find_workflow_node_path(children, step_id) {
-                child_path.insert(0, (index, Some(key)));
-                return Some(child_path);
-            }
-        }
-    }
-    None
-}
-
-fn workflow_node_at_path_mut<'a>(
-    nodes: &'a mut Vec<Value>,
-    path: &[(usize, Option<&'static str>)],
-) -> Option<&'a mut Map<String, Value>> {
-    let (index, branch) = *path.first()?;
-    let object = nodes.get_mut(index)?.as_object_mut()?;
-    if path.len() == 1 {
-        return Some(object);
-    }
-    let children = object.get_mut(branch?)?.as_array_mut()?;
-    workflow_node_at_path_mut(children, &path[1..])
-}
-
-fn validate_and_set_workflow_node_field(
+fn validate_and_set_workflow_graph_node_field(
     node: &mut Map<String, Value>,
     field: &str,
     value: Value,
 ) -> Result<(), ServiceFailure> {
     let node_type = node.get("type").and_then(Value::as_str).unwrap_or_default();
+    if field == "position.x" || field == "position.y" {
+        let coordinate = field.trim_start_matches("position.");
+        let number = value
+            .as_f64()
+            .filter(|number| number.is_finite() && (-10000.0..=10000.0).contains(number))
+            .ok_or_else(|| ServiceFailure::validation("节点位置必须在 -10000 到 10000 之间"))?;
+        node.get_mut("position")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| ServiceFailure::validation("流程节点位置结构无效"))?
+            .insert(coordinate.into(), json!(number));
+        return Ok(());
+    }
     match (node_type, field) {
-        ("action", "kind") => {
-            let value_text = value
-                .as_str()
-                .ok_or_else(|| ServiceFailure::validation("kind 必须是字符串"))?;
-            if !matches!(value_text, "backup" | "transcode" | "mix" | "check") {
-                return Err(ServiceFailure::validation("未知流程动作类型"));
-            }
-            node.insert(field.into(), value);
-        }
         ("action", "presetId") => {
             let value_text = value
                 .as_str()
@@ -1781,127 +1812,406 @@ fn validate_and_set_workflow_node_field(
             }
             node.insert(field.into(), value);
         }
-        ("action", "failureMode") => {
-            if !matches!(value.as_str(), Some("stop" | "continue")) {
+        ("filter", "filter.mediaKind") => {
+            if !matches!(value.as_str(), Some("all" | "video" | "audio")) {
                 return Err(ServiceFailure::validation(
-                    "failureMode 只能是 stop 或 continue",
+                    "mediaKind 只能是 all、video 或 audio",
                 ));
             }
-            node.insert(field.into(), value);
-        }
-        ("condition", field) if field.starts_with("condition.") => {
-            let key = field.trim_start_matches("condition.");
-            let condition = node
-                .get_mut("condition")
+            node.get_mut("filter")
                 .and_then(Value::as_object_mut)
-                .ok_or_else(|| ServiceFailure::validation("条件节点结构无效"))?;
-            match key {
-                "kind" => {
-                    if !matches!(
-                        value.as_str(),
-                        Some(
-                            "source_has_media"
-                                | "backup_destinations_fit"
-                                | "last_step_succeeded"
-                                | "last_backup_verified"
-                        )
-                    ) {
-                        return Err(ServiceFailure::validation("未知条件类型"));
-                    }
-                }
-                "backupPresetId" => {
-                    if value
-                        .as_str()
-                        .is_none_or(|text| text.len() > 128 || text.contains('\0'))
-                    {
-                        return Err(ServiceFailure::validation("backupPresetId 无效"));
-                    }
-                }
-                "reservePercent" => {
-                    if value
-                        .as_f64()
-                        .is_none_or(|number| !(0.0..=100.0).contains(&number))
-                    {
-                        return Err(ServiceFailure::validation(
-                            "reservePercent 必须在 0 到 100 之间",
-                        ));
-                    }
-                }
-                _ => return Err(ServiceFailure::validation(format!("未知条件字段: {field}"))),
+                .ok_or_else(|| ServiceFailure::validation("筛选节点结构无效"))?
+                .insert("mediaKind".into(), value);
+        }
+        ("filter", "filter.nameIncludes") => {
+            if value
+                .as_str()
+                .is_none_or(|text| text.len() > 256 || text.contains('\0'))
+            {
+                return Err(ServiceFailure::validation("nameIncludes 无效"));
             }
-            condition.insert(key.into(), value);
+            node.get_mut("filter")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| ServiceFailure::validation("筛选节点结构无效"))?
+                .insert("nameIncludes".into(), value);
+        }
+        ("probe", "metric") => {
+            if !matches!(
+                value.as_str(),
+                Some("long_edge" | "frame_rate" | "list_index" | "reverse_index")
+            ) {
+                return Err(ServiceFailure::validation("未知检测指标"));
+            }
+            node.insert("metric".into(), value);
+        }
+        ("logic", "logic.value") => {
+            let number = value
+                .as_f64()
+                .filter(|number| {
+                    number.is_finite() && (-1_000_000.0..=1_000_000.0).contains(number)
+                })
+                .ok_or_else(|| {
+                    ServiceFailure::validation("逻辑常量必须在 -1000000 到 1000000 之间")
+                })?;
+            workflow_nested_field(node, "logic", "value", json!(number))?;
+        }
+        ("logic", "logic.mathOperator") => {
+            if !matches!(
+                value.as_str(),
+                Some("add" | "subtract" | "multiply" | "divide" | "modulo")
+            ) {
+                return Err(ServiceFailure::validation("未知数值运算符"));
+            }
+            workflow_nested_field(node, "logic", "mathOperator", value)?;
+        }
+        ("logic", "logic.compareOperator") => {
+            if !matches!(
+                value.as_str(),
+                Some("eq" | "ne" | "lt" | "lte" | "gt" | "gte")
+            ) {
+                return Err(ServiceFailure::validation("未知比较运算符"));
+            }
+            workflow_nested_field(node, "logic", "compareOperator", value)?;
+        }
+        ("logic", "logic.booleanOperator") => {
+            if !matches!(value.as_str(), Some("and" | "or" | "xor" | "not")) {
+                return Err(ServiceFailure::validation("未知布尔运算符"));
+            }
+            workflow_nested_field(node, "logic", "booleanOperator", value)?;
+        }
+        ("output", "output.mode") => {
+            if !matches!(
+                value.as_str(),
+                Some("collect" | "copy" | "move" | "restore")
+            ) {
+                return Err(ServiceFailure::validation("未知文件输出模式"));
+            }
+            workflow_nested_field(node, "output", "mode", value)?;
+        }
+        ("output", "output.directory") => {
+            if value
+                .as_str()
+                .is_none_or(|text| text.len() > 4096 || text.contains('\0'))
+            {
+                return Err(ServiceFailure::validation("输出目录无效"));
+            }
+            workflow_nested_field(node, "output", "directory", value)?;
+        }
+        ("output", "output.writeLog") => {
+            if !value.is_boolean() {
+                return Err(ServiceFailure::validation("writeLog 必须是布尔值"));
+            }
+            workflow_nested_field(node, "output", "writeLog", value)?;
         }
         _ => {
             return Err(ServiceFailure::validation(format!(
-                "该步骤不支持字段 {field}"
+                "该节点不支持字段 {field}"
             )))
         }
     }
     Ok(())
 }
 
-fn remove_workflow_node(nodes: &mut Vec<Value>, step_id: &str) -> bool {
-    if let Some(index) = nodes
-        .iter()
-        .position(|node| node.get("id").and_then(Value::as_str) == Some(step_id))
-    {
-        nodes.remove(index);
-        return true;
-    }
-    for node in nodes {
-        if node.get("type").and_then(Value::as_str) != Some("condition") {
-            continue;
-        }
-        for key in ["thenSteps", "elseSteps"] {
-            if let Some(children) = node.get_mut(key).and_then(Value::as_array_mut) {
-                if remove_workflow_node(children, step_id) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+fn workflow_nested_field(
+    node: &mut Map<String, Value>,
+    object: &str,
+    field: &str,
+    value: Value,
+) -> Result<(), ServiceFailure> {
+    node.get_mut(object)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| ServiceFailure::validation("流程节点结构无效"))?
+        .insert(field.into(), value);
+    Ok(())
 }
 
-fn move_workflow_node_in_same_list(
-    nodes: &mut Vec<Value>,
-    step_id: &str,
-    after_step_id: &str,
-) -> bool {
-    if let Some(from) = nodes
-        .iter()
-        .position(|node| node.get("id").and_then(Value::as_str) == Some(step_id))
-    {
-        let target = if after_step_id == "-" {
-            Some(0)
-        } else {
-            nodes
-                .iter()
-                .position(|node| node.get("id").and_then(Value::as_str) == Some(after_step_id))
-                .map(|index| index + 1)
-        };
-        if let Some(mut target) = target {
-            let node = nodes.remove(from);
-            if from < target {
-                target = target.saturating_sub(1);
+fn workflow_graph_parts(params: &Value) -> Result<(&[Value], &[Value]), ServiceFailure> {
+    let graph = params
+        .get("graph")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ServiceFailure::validation("流程 graph 结构无效"))?;
+    let nodes = graph
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ServiceFailure::validation("流程 graph.nodes 结构无效"))?;
+    let edges = graph
+        .get("edges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ServiceFailure::validation("流程 graph.edges 结构无效"))?;
+    Ok((nodes, edges))
+}
+
+fn workflow_node_ports(
+    node: &Value,
+) -> Result<
+    (
+        Vec<(&'static str, &'static str, bool)>,
+        Vec<(&'static str, &'static str, bool)>,
+    ),
+    ServiceFailure,
+> {
+    let media_in = vec![("media", "media", true)];
+    match node.get("type").and_then(Value::as_str) {
+        Some("action") => {
+            if !matches!(
+                node.get("kind").and_then(Value::as_str),
+                Some("backup" | "transcode" | "mix" | "check")
+            ) {
+                return Err(ServiceFailure::validation("流程动作类型无效"));
             }
-            nodes.insert(target.min(nodes.len()), node);
-            return true;
+            Ok((
+                media_in,
+                vec![
+                    ("media", "media", false),
+                    ("failed", "media", false),
+                    ("success", "bool", false),
+                    ("report", "report", false),
+                    ("error", "error", false),
+                ],
+            ))
         }
+        Some("filter") => Ok((media_in, vec![("media", "media", false)])),
+        Some("probe") => {
+            if !matches!(
+                node.get("metric").and_then(Value::as_str),
+                Some("long_edge" | "frame_rate" | "list_index" | "reverse_index")
+            ) {
+                return Err(ServiceFailure::validation("流程检测指标无效"));
+            }
+            Ok((
+                media_in,
+                vec![
+                    ("media", "media", false),
+                    ("value", "number", false),
+                    ("error", "error", false),
+                ],
+            ))
+        }
+        Some("gate") => Ok((
+            vec![("media", "media", true), ("condition", "bool", true)],
+            vec![("matched", "media", false), ("unmatched", "media", false)],
+        )),
+        Some("output") => Ok((
+            vec![("media", "media", true), ("report", "report", false)],
+            vec![
+                ("media", "media", false),
+                ("report", "report", false),
+                ("error", "error", false),
+            ],
+        )),
+        Some("logic") => {
+            let logic = node
+                .get("logic")
+                .and_then(Value::as_object)
+                .ok_or_else(|| ServiceFailure::validation("流程逻辑节点结构无效"))?;
+            match logic.get("kind").and_then(Value::as_str) {
+                Some("count") => Ok((media_in, vec![("value", "number", false)])),
+                Some("math") => Ok((
+                    vec![("value", "number", true)],
+                    vec![("value", "number", false)],
+                )),
+                Some("compare") => Ok((
+                    vec![("value", "number", true)],
+                    vec![("result", "bool", false)],
+                )),
+                Some("boolean") => {
+                    let mut inputs = vec![("left", "bool", true)];
+                    if logic.get("booleanOperator").and_then(Value::as_str) != Some("not") {
+                        inputs.push(("right", "bool", true));
+                    }
+                    Ok((inputs, vec![("result", "bool", false)]))
+                }
+                _ => Err(ServiceFailure::validation("流程逻辑类型无效")),
+            }
+        }
+        _ => Err(ServiceFailure::validation("流程包含未知节点")),
+    }
+}
+
+fn workflow_node_port_type(
+    nodes: &[Value],
+    node_id: &str,
+    port_id: &str,
+    source: bool,
+) -> Result<&'static str, ServiceFailure> {
+    if node_id == WORKFLOW_START_ID {
+        return if source && port_id == "media" {
+            Ok("media")
+        } else {
+            Err(ServiceFailure::validation("输入节点端口无效"))
+        };
+    }
+    let node = nodes
+        .iter()
+        .find(|node| node.get("id").and_then(Value::as_str) == Some(node_id))
+        .ok_or_else(|| {
+            ServiceFailure::new(error_code::NOT_FOUND, format!("不存在流程节点: {node_id}"))
+        })?;
+    let (inputs, outputs) = workflow_node_ports(node)?;
+    (if source { outputs } else { inputs })
+        .into_iter()
+        .find(|(id, _, _)| *id == port_id)
+        .map(|(_, port_type, _)| port_type)
+        .ok_or_else(|| ServiceFailure::validation(format!("节点 {node_id} 不存在端口 {port_id}")))
+}
+
+fn workflow_reaches(
+    edges: &[Value],
+    current: &str,
+    target: &str,
+    seen: &mut HashSet<String>,
+) -> bool {
+    current == target
+        || (seen.insert(current.to_string())
+            && edges.iter().any(|edge| {
+                edge.get("source").and_then(Value::as_str) == Some(current)
+                    && edge
+                        .get("target")
+                        .and_then(Value::as_str)
+                        .is_some_and(|next| workflow_reaches(edges, next, target, seen))
+            }))
+}
+
+fn validate_workflow_connection(
+    params: &Value,
+    source: &str,
+    source_port: &str,
+    target: &str,
+    target_port: &str,
+) -> Result<(), ServiceFailure> {
+    if source == target {
+        return Err(ServiceFailure::validation("流程节点不能连接到自己"));
+    }
+    let (nodes, edges) = workflow_graph_parts(params)?;
+    let source_type = workflow_node_port_type(nodes, source, source_port, true)?;
+    let target_type = workflow_node_port_type(nodes, target, target_port, false)?;
+    if source_type != target_type {
+        return Err(ServiceFailure::validation("流程端口类型不匹配"));
+    }
+    if edges.iter().any(|edge| {
+        edge.get("source").and_then(Value::as_str) == Some(source)
+            && edge.get("sourcePort").and_then(Value::as_str) == Some(source_port)
+            && edge.get("target").and_then(Value::as_str) == Some(target)
+            && edge.get("targetPort").and_then(Value::as_str) == Some(target_port)
+    }) {
+        return Err(ServiceFailure::validation("流程连线已存在"));
+    }
+    if source != WORKFLOW_START_ID && workflow_reaches(edges, target, source, &mut HashSet::new()) {
+        return Err(ServiceFailure::validation("流程连线会形成环路"));
+    }
+    Ok(())
+}
+
+fn validate_workflow_graph_structure(
+    params: &Value,
+    require_complete: bool,
+) -> Result<(), ServiceFailure> {
+    let (nodes, edges) = workflow_graph_parts(params)?;
+    let mut node_ids = HashSet::new();
+    for node in nodes {
+        let node_id = node
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && *id != WORKFLOW_START_ID)
+            .ok_or_else(|| ServiceFailure::validation("流程节点 ID 无效"))?;
+        if !node_ids.insert(node_id) {
+            return Err(ServiceFailure::validation("流程节点 ID 重复"));
+        }
+        workflow_node_ports(node)?;
+    }
+
+    let mut edge_ids = HashSet::new();
+    let mut connections = HashSet::new();
+    for edge in edges {
+        let edge_id = edge
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ServiceFailure::validation("流程连线 ID 无效"))?;
+        if !edge_ids.insert(edge_id) {
+            return Err(ServiceFailure::validation("流程连线 ID 重复"));
+        }
+        let source = edge
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let source_port = edge
+            .get("sourcePort")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let target = edge
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let target_port = edge
+            .get("targetPort")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if source == target {
+            return Err(ServiceFailure::validation("流程节点不能连接到自己"));
+        }
+        if workflow_node_port_type(nodes, source, source_port, true)?
+            != workflow_node_port_type(nodes, target, target_port, false)?
+        {
+            return Err(ServiceFailure::validation("流程端口类型不匹配"));
+        }
+        if !connections.insert((source, source_port, target, target_port)) {
+            return Err(ServiceFailure::validation("流程连线重复"));
+        }
+        if source != WORKFLOW_START_ID
+            && workflow_reaches(edges, target, source, &mut HashSet::new())
+        {
+            return Err(ServiceFailure::validation("流程包含环路"));
+        }
+    }
+
+    if !require_complete || nodes.is_empty() {
+        return Ok(());
+    }
+    let mut reachable = HashSet::from([WORKFLOW_START_ID.to_string()]);
+    loop {
+        let before = reachable.len();
+        for edge in edges {
+            let source = edge
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let target = edge
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if reachable.contains(source) {
+                reachable.insert(target.to_string());
+            }
+        }
+        if reachable.len() == before {
+            break;
+        }
+    }
+    if nodes.iter().any(|node| {
+        node.get("id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| !reachable.contains(id))
+    }) {
+        return Err(ServiceFailure::validation("存在未接入流程的节点"));
     }
     for node in nodes {
-        if node.get("type").and_then(Value::as_str) != Some("condition") {
-            continue;
-        }
-        for key in ["thenSteps", "elseSteps"] {
-            if let Some(children) = node.get_mut(key).and_then(Value::as_array_mut) {
-                if move_workflow_node_in_same_list(children, step_id, after_step_id) {
-                    return true;
-                }
+        let node_id = node.get("id").and_then(Value::as_str).unwrap();
+        let (inputs, _) = workflow_node_ports(node)?;
+        for (port_id, _, required) in inputs {
+            if required
+                && !edges.iter().any(|edge| {
+                    edge.get("target").and_then(Value::as_str) == Some(node_id)
+                        && edge.get("targetPort").and_then(Value::as_str) == Some(port_id)
+                })
+            {
+                return Err(ServiceFailure::validation(format!(
+                    "节点 {node_id} 缺少必需输入 {port_id}"
+                )));
             }
         }
     }
-    false
+    Ok(())
 }
 
 fn start_task(
@@ -2047,25 +2357,7 @@ fn collect_workflow_task_presets(
     seen: &mut HashSet<String>,
 ) -> Result<(), ServiceFailure> {
     for node in nodes {
-        if node.get("type").and_then(Value::as_str) == Some("condition") {
-            let condition = node
-                .get("condition")
-                .and_then(Value::as_object)
-                .ok_or_else(|| ServiceFailure::validation("流程条件结构无效"))?;
-            if condition.get("kind").and_then(Value::as_str) == Some("backup_destinations_fit") {
-                let preset_id = condition
-                    .get("backupPresetId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                collect_task_preset(state, preset_id, "backup", None, snapshots, seen)?;
-            }
-            for key in ["thenSteps", "elseSteps"] {
-                let children = node
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| ServiceFailure::validation("流程条件分支结构无效"))?;
-                collect_workflow_task_presets(state, children, snapshots, seen)?;
-            }
+        if node.get("type").and_then(Value::as_str) != Some("action") {
             continue;
         }
 
@@ -2118,12 +2410,12 @@ fn collect_agent_task_preset_snapshots(
     if function == "check" {
         collect_check_reference(state, &main_preset.params, &mut snapshots, &mut seen)?;
     } else if function == "workflow" {
-        let steps = main_preset
+        let nodes = main_preset
             .params
-            .get("steps")
+            .pointer("/graph/nodes")
             .and_then(Value::as_array)
-            .ok_or_else(|| ServiceFailure::validation("流程 steps 结构无效"))?;
-        collect_workflow_task_presets(state, steps, &mut snapshots, &mut seen)?;
+            .ok_or_else(|| ServiceFailure::validation("流程 graph.nodes 结构无效"))?;
+        collect_workflow_task_presets(state, nodes, &mut snapshots, &mut seen)?;
     }
     Ok(snapshots)
 }
@@ -2251,32 +2543,12 @@ fn validate_agent_workflow(state: &StoredState, params: &Value) -> Result<(), Se
             "Agent CLI 第一版只允许手动触发的流程",
         ));
     }
-    let steps = params
-        .get("steps")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ServiceFailure::validation("流程 steps 结构无效"))?;
-    validate_agent_workflow_nodes(state, steps)
-}
-
-fn validate_agent_workflow_nodes(
-    state: &StoredState,
-    nodes: &[Value],
-) -> Result<(), ServiceFailure> {
+    validate_workflow_graph_structure(params, true)?;
+    let (nodes, _) = workflow_graph_parts(params)?;
     for node in nodes {
-        if node.get("type").and_then(Value::as_str) == Some("condition") {
-            for key in ["thenSteps", "elseSteps"] {
-                let children = node
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| ServiceFailure::validation("流程条件分支结构无效"))?;
-                validate_agent_workflow_nodes(state, children)?;
-            }
-            continue;
-        }
-        if node.get("type").and_then(Value::as_str) != Some("action") {
-            return Err(ServiceFailure::validation("流程包含未知节点"));
-        }
-        if node.get("kind").and_then(Value::as_str) == Some("backup") {
+        if node.get("type").and_then(Value::as_str) == Some("action")
+            && node.get("kind").and_then(Value::as_str) == Some("backup")
+        {
             let preset_id = node
                 .get("presetId")
                 .and_then(Value::as_str)
@@ -2290,6 +2562,17 @@ fn validate_agent_workflow_nodes(
                     "流程引用了移动源文件的备份预设",
                 ));
             }
+        }
+        if node.get("type").and_then(Value::as_str) == Some("output")
+            && matches!(
+                node.pointer("/output/mode").and_then(Value::as_str),
+                Some("move" | "restore")
+            )
+        {
+            return Err(ServiceFailure::new(
+                error_code::DESTRUCTIVE_COMMAND_DENIED,
+                "Agent CLI 不允许启动包含移动文件操作的流程",
+            ));
         }
     }
     Ok(())
@@ -3152,6 +3435,137 @@ mod tests {
     }
 
     #[test]
+    fn workflow_graph_supports_fanout_and_rejects_invalid_connections() {
+        let service = AgentService::open_in_memory();
+        let workflow = create_preset_of_type(
+            &service,
+            "create-graph-workflow",
+            "session-a",
+            "workflow",
+            "并行流程",
+        );
+        let add_node = |request_id: &str, revision: i64| {
+            service.handle(request(
+                request_id,
+                "session-a",
+                Some(revision),
+                AgentCommand::WorkflowNodeAdd {
+                    workflow_id: workflow.id.clone(),
+                    kind: "filter".into(),
+                },
+            ))
+        };
+        let first = add_node("add-filter-a", workflow.revision);
+        assert!(first.ok, "{:?}", first.error);
+        let first_id = first.result.as_ref().unwrap()["change"]["nodeId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let first_revision = first.receipt.unwrap().entity_revision.unwrap();
+        let second = add_node("add-filter-b", first_revision);
+        assert!(second.ok, "{:?}", second.error);
+        let second_id = second.result.as_ref().unwrap()["change"]["nodeId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut revision = second.receipt.unwrap().entity_revision.unwrap();
+
+        for (request_id, target) in [
+            ("connect-start-a", first_id.as_str()),
+            ("connect-start-b", second_id.as_str()),
+        ] {
+            let connected = service.handle(request(
+                request_id,
+                "session-a",
+                Some(revision),
+                AgentCommand::WorkflowEdgeAdd {
+                    workflow_id: workflow.id.clone(),
+                    source: WORKFLOW_START_ID.into(),
+                    source_port: "media".into(),
+                    target: target.into(),
+                    target_port: "media".into(),
+                },
+            ));
+            assert!(connected.ok, "{:?}", connected.error);
+            revision = connected.receipt.unwrap().entity_revision.unwrap();
+        }
+
+        let chain = service.handle(request(
+            "connect-a-b",
+            "session-a",
+            Some(revision),
+            AgentCommand::WorkflowEdgeAdd {
+                workflow_id: workflow.id.clone(),
+                source: first_id.clone(),
+                source_port: "media".into(),
+                target: second_id.clone(),
+                target_port: "media".into(),
+            },
+        ));
+        assert!(chain.ok, "{:?}", chain.error);
+        revision = chain.receipt.unwrap().entity_revision.unwrap();
+
+        let cycle = service.handle(request(
+            "connect-cycle",
+            "session-a",
+            Some(revision),
+            AgentCommand::WorkflowEdgeAdd {
+                workflow_id: workflow.id.clone(),
+                source: second_id.clone(),
+                source_port: "media".into(),
+                target: first_id.clone(),
+                target_port: "media".into(),
+            },
+        ));
+        assert!(!cycle.ok);
+        assert_eq!(cycle.error.unwrap().code, error_code::VALIDATION_ERROR);
+
+        let invalid_port = service.handle(request(
+            "connect-invalid-port",
+            "session-a",
+            Some(revision),
+            AgentCommand::WorkflowEdgeAdd {
+                workflow_id: workflow.id.clone(),
+                source: WORKFLOW_START_ID.into(),
+                source_port: "media".into(),
+                target: first_id.clone(),
+                target_port: "condition".into(),
+            },
+        ));
+        assert!(!invalid_port.ok);
+
+        let removed = service.handle(request(
+            "remove-filter-a",
+            "session-a",
+            Some(revision),
+            AgentCommand::WorkflowNodeRemove {
+                workflow_id: workflow.id,
+                node_id: first_id,
+            },
+        ));
+        assert!(removed.ok, "{:?}", removed.error);
+        let preset = &removed.result.as_ref().unwrap()["preset"];
+        assert_eq!(
+            preset
+                .pointer("/params/graph/nodes")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            preset
+                .pointer("/params/graph/edges")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn workflow_task_rejects_stale_child_revision_then_captures_child_snapshot() {
         let service = AgentService::open_in_memory();
         let encode = create_preset_of_type(
@@ -3168,53 +3582,53 @@ mod tests {
             "workflow",
             "代理流程",
         );
-        let added_step = service.handle(request(
-            "add-workflow-step",
+        let added_node = service.handle(request(
+            "add-workflow-node",
             "session-a",
             Some(workflow.revision),
-            AgentCommand::WorkflowStepAdd {
+            AgentCommand::WorkflowNodeAdd {
                 workflow_id: workflow.id.clone(),
                 kind: "transcode".into(),
-                parent_id: None,
-                branch: None,
             },
         ));
-        assert!(added_step.ok, "{:?}", added_step.error);
-        let step_id = added_step
+        assert!(added_node.ok, "{:?}", added_node.error);
+        let node_id = added_node
             .result
             .as_ref()
-            .and_then(|result| result.pointer("/change/stepId"))
+            .and_then(|result| result.pointer("/change/nodeId"))
             .and_then(Value::as_str)
             .unwrap()
             .to_string();
-        let mut workflow_revision = added_step.receipt.unwrap().entity_revision.unwrap();
+        let mut workflow_revision = added_node.receipt.unwrap().entity_revision.unwrap();
 
         let set_id = service.handle(request(
             "set-workflow-preset-id",
             "session-a",
             Some(workflow_revision),
-            AgentCommand::WorkflowStepSet {
+            AgentCommand::WorkflowNodeSet {
                 workflow_id: workflow.id.clone(),
-                step_id: step_id.clone(),
+                node_id: node_id.clone(),
                 field: "presetId".into(),
                 value: json!(encode.id.clone()),
             },
         ));
         assert!(set_id.ok, "{:?}", set_id.error);
         workflow_revision = set_id.receipt.unwrap().entity_revision.unwrap();
-        let set_revision = service.handle(request(
-            "set-workflow-preset-revision",
+
+        let connected = service.handle(request(
+            "connect-workflow-input",
             "session-a",
             Some(workflow_revision),
-            AgentCommand::WorkflowStepSet {
+            AgentCommand::WorkflowEdgeAdd {
                 workflow_id: workflow.id.clone(),
-                step_id: step_id.clone(),
-                field: "presetRevision".into(),
-                value: json!(encode.revision),
+                source: WORKFLOW_START_ID.into(),
+                source_port: "media".into(),
+                target: node_id.clone(),
+                target_port: "media".into(),
             },
         ));
-        assert!(set_revision.ok, "{:?}", set_revision.error);
-        workflow_revision = set_revision.receipt.unwrap().entity_revision.unwrap();
+        assert!(connected.ok, "{:?}", connected.error);
+        workflow_revision = connected.receipt.unwrap().entity_revision.unwrap();
 
         let changed_encode = service.handle(request(
             "update-workflow-encode",
@@ -3269,9 +3683,9 @@ mod tests {
             "sync-workflow-preset-revision",
             "session-a",
             Some(workflow_revision),
-            AgentCommand::WorkflowStepSet {
+            AgentCommand::WorkflowNodeSet {
                 workflow_id: workflow.id.clone(),
-                step_id,
+                node_id,
                 field: "presetRevision".into(),
                 value: json!(changed_encode.revision),
             },

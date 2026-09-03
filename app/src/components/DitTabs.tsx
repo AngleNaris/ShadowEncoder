@@ -10,12 +10,15 @@ import {
 } from './icons';
 import {
   checkVideos,
+  getVideoInfo,
   mixAudio,
   pickPath,
   runDitBackup,
   transcode,
+  writeWorkflowLog,
   type DitBackupRequest,
   type DitBackupSummary,
+  type TranscodeBatchResult,
 } from '../lib/ffmpeg';
 import { useFileList } from '../lib/fileListContext';
 import {
@@ -35,20 +38,26 @@ import {
 import { WorkflowEditor, WorkflowPresetBuilder } from './WorkflowEditor';
 import {
   WORKFLOW_ACTION_LABELS,
-  WORKFLOW_CONDITION_LABELS,
   normalizeWorkflowDefinition,
-  workflowNodeCounts,
   type WorkflowActionKind,
-  type WorkflowActionNode,
-  type WorkflowConditionNode,
   type WorkflowDefinition,
-  type WorkflowNode,
 } from '../lib/workflow';
 import {
+  executeWorkflowGraphDAG,
+  workflowDefinitionNodeCounts,
+  workflowGraphIssues,
+  type WorkflowGraph,
+  type WorkflowAsset,
+  type WorkflowBoolValue,
+  type WorkflowGraphActionNode,
+  type WorkflowGraphProbeNode,
+  type WorkflowGraphOutputNode,
+  type WorkflowNodeOutputs,
+  type WorkflowPortValue,
+  type WorkflowReportValue,
+} from '../lib/workflowGraph';
+import {
   collectWorkflowSourceFiles,
-  evaluateBackupCapacity,
-  formatWorkflowBytes,
-  sourceContainsMedia,
   waitForNewStorageVolume,
 } from '../lib/workflowRuntime';
 import {
@@ -721,12 +730,9 @@ type WorkflowTaskRunner = ReturnType<typeof useTaskRunner>;
 
 type WorkflowExecutionState = {
   paths: string[];
-  pathsAreFiles: boolean;
   outputPaths: string[];
   pass: number;
   fail: number;
-  lastStepSucceeded: boolean;
-  lastBackupVerified: boolean;
 };
 
 type WorkflowExecutionEnvironment = {
@@ -735,6 +741,7 @@ type WorkflowExecutionEnvironment = {
   triggerKind: WorkflowDefinition['trigger']['kind'];
   agentMode: boolean;
   totalActions: number;
+  startedActions: number;
   completedActions: number;
   resolveMediaPaths: (paths: string[]) => Promise<string[]>;
 };
@@ -753,7 +760,7 @@ function findPreset(
   return preset;
 }
 
-async function transcodePreset(paths: string[], preset: Preset, uniqueName = false): Promise<string[]> {
+async function transcodePreset(paths: string[], preset: Preset, uniqueName = false): Promise<TranscodeBatchResult> {
   const form: any = { ...DEFAULT_ENCODE_FORM, ...normalizeEncodeParams(preset.params) };
   return transcode({
     paths,
@@ -783,7 +790,7 @@ async function transcodePreset(paths: string[], preset: Preset, uniqueName = fal
     denoise: form.denoise,
     deblock: form.deblock,
     loudnorm: form.loudnorm,
-    audioOnly: form.audioOnly,
+    outputKind: form.outputKind,
     noAudio: form.noAudio,
     keepRes: form.keepRes,
     rateMode: form.rateMode || 'crf',
@@ -798,44 +805,42 @@ function workflowValidationIssues(
   presets: WorkflowPresetSets,
 ): string[] {
   const issues: string[] = [];
-  const visit = (nodes: WorkflowNode[]) => {
-    for (const node of nodes) {
-      if (node.type === 'condition') {
-        if (node.condition.kind === 'backup_destinations_fit'
-          && !presets.backup.some((preset) => preset.id === node.condition.backupPresetId)) {
-          issues.push('容量判断引用的备份预设不存在');
-        }
-        visit(node.thenSteps);
-        visit(node.elseSteps);
-        continue;
+  const validateNode = (node: WorkflowGraph['nodes'][number]) => {
+    if (node.type === 'output') {
+      if ((node.output.mode === 'copy' || node.output.mode === 'move' || node.output.writeLog) && !node.output.directory.trim()) {
+        issues.push('文件输出节点未选择目录');
       }
-      const preset = presets[node.kind].find((item) => item.id === node.presetId);
-      if (!preset) {
-        issues.push(`${WORKFLOW_ACTION_LABELS[node.kind]}引用的预设不存在`);
-        continue;
+      return;
+    }
+    if (node.type !== 'action') return;
+    const preset = presets[node.kind].find((item) => item.id === node.presetId);
+    if (!preset) {
+      issues.push(`${WORKFLOW_ACTION_LABELS[node.kind]}引用的预设不存在`);
+      return;
+    }
+    if ((preset.revision ?? 1) !== node.presetRevision) {
+      issues.push(`${WORKFLOW_ACTION_LABELS[node.kind]}引用的预设已更新`);
+    }
+    if (node.kind === 'backup') {
+      const form = normalizeBackupForm(preset.params);
+      if (hasInvalidBackupOptions(form, buildBackupRequest(form, ['workflow-source']))) {
+        issues.push(`备份预设“${preset.name}”的目标或命名设置不完整`);
       }
-      if ((preset.revision ?? 1) !== node.presetRevision) {
-        issues.push(`${WORKFLOW_ACTION_LABELS[node.kind]}引用的预设已更新`);
+      if (definition.trigger.kind === 'removable' && form.operation === 'move') {
+        issues.push('磁盘触发流程不能使用“移动源文件”的备份预设');
       }
-      if (node.kind === 'backup') {
-        const form = normalizeBackupForm(preset.params);
-        if (hasInvalidBackupOptions(form, buildBackupRequest(form, ['workflow-source']))) {
-          issues.push(`备份预设“${preset.name}”的目标或命名设置不完整`);
-        }
-        if (definition.trigger.kind === 'removable' && form.operation === 'move') {
-          issues.push('磁盘触发流程不能使用“移动源文件”的备份预设');
-        }
-      }
-      if (node.kind === 'check') {
-        const referenceId = String(preset.params.refEncPresetId || '');
-        if (referenceId && !presets.transcode.some((item) => item.id === referenceId)) {
-          issues.push(`检测预设“${preset.name}”引用的转码规范不存在`);
-        }
+    }
+    if (node.kind === 'check') {
+      const referenceId = String(preset.params.refEncPresetId || '');
+      if (referenceId && !presets.transcode.some((item) => item.id === referenceId)) {
+        issues.push(`检测预设“${preset.name}”引用的转码规范不存在`);
       }
     }
   };
-  visit(definition.steps);
-  if (workflowNodeCounts(definition.steps).actions === 0) issues.push('流程至少需要一个执行步骤');
+  issues.push(...workflowGraphIssues(definition.graph));
+  definition.graph.nodes.forEach(validateNode);
+  if (workflowDefinitionNodeCounts(definition).actions === 0) issues.push('流程至少需要一个执行步骤');
+  if (!definition.graph.nodes.some((node) => node.type === 'output')) issues.push('流程需要至少一个文件输出节点');
   return [...new Set(issues)];
 }
 
@@ -847,187 +852,240 @@ function workflowLog(
   task.appendLog({ kind: 'summary', stage: 'workflow', tone, message });
 }
 
-async function resolveWorkflowActionInputs(
-  state: WorkflowExecutionState,
-  environment: WorkflowExecutionEnvironment,
-): Promise<string[]> {
-  if (!state.pathsAreFiles) {
-    state.paths = await environment.resolveMediaPaths(state.paths);
-    state.pathsAreFiles = true;
-  }
-  if (state.paths.length === 0) throw new Error('当前步骤没有可处理的媒体文件');
-  return state.paths;
+function appendWorkflowOutputs(state: WorkflowExecutionState, paths: string[]) {
+  const seen = new Set(state.outputPaths);
+  state.outputPaths = [...state.outputPaths, ...paths.filter((path) => !seen.has(path) && !!seen.add(path))];
+}
+
+function assetMap(assets: WorkflowAsset[]) {
+  return new Map(assets.map((asset) => [asset.path, asset]));
+}
+
+async function resolveWorkflowAssets(assets: WorkflowAsset[], environment: WorkflowExecutionEnvironment): Promise<WorkflowAsset[]> {
+  const paths = await environment.resolveMediaPaths(assets.map((asset) => asset.path));
+  const existing = assetMap(assets);
+  return paths.map((path, index) => existing.get(path) ?? {
+    id: `${assets[0]?.id ?? 'asset'}:${index}:${path}`,
+    path,
+    sourcePath: path,
+    index,
+  });
+}
+
+function workflowSignals(assets: WorkflowAsset[], passed: Set<string>): WorkflowBoolValue {
+  return { type: 'bool', values: new Map(assets.map((asset) => [asset.id, passed.has(asset.id)])) };
 }
 
 async function runWorkflowAction(
-  node: WorkflowActionNode,
+  node: WorkflowGraphActionNode,
   state: WorkflowExecutionState,
   environment: WorkflowExecutionEnvironment,
-) {
+  sourceAssets: WorkflowAsset[],
+): Promise<WorkflowNodeOutputs> {
   const { task, presets } = environment;
   const label = WORKFLOW_ACTION_LABELS[node.kind];
   const preset = findPreset(presets[node.kind], node.presetId, label);
-  if ((preset.revision ?? 1) !== node.presetRevision) {
-    throw new Error(`${label}预设“${preset.name}”已更新，请先同步流程中的预设版本`);
-  }
-  environment.completedActions += 1;
-  const actionIndex = environment.completedActions;
-  const progressBefore = ((actionIndex - 1) / Math.max(1, environment.totalActions)) * 100;
-  task.setProgress(progressBefore);
+  if ((preset.revision ?? 1) !== node.presetRevision) throw new Error(`${label}预设“${preset.name}”已更新，请先同步流程中的预设版本`);
+  const assets = await resolveWorkflowAssets(sourceAssets, environment);
+  environment.startedActions += 1;
+  const actionIndex = environment.startedActions;
   task.setDetail(`流程 ${actionIndex}/${environment.totalActions} · ${label}`);
   workflowLog(task, `步骤 ${actionIndex}/${environment.totalActions} · ${label} · ${preset.name}`);
-  const failBefore = state.fail;
-
+  const passed = new Set<string>();
+  const successful: WorkflowAsset[] = [];
+  const failed: WorkflowAsset[] = [];
+  const errors = new Map<string, string>();
+  const report: string[] = [];
   try {
     if (node.kind === 'backup') {
       const form = normalizeBackupForm(preset.params);
       const request: DitBackupRequest = {
-        ...buildBackupRequest(form, state.paths, new Date()),
+        ...buildBackupRequest(form, assets.map((asset) => asset.path), new Date()),
         ...(environment.agentMode ? { operation: 'copy', reuseIdentical: false } : {}),
       };
       if (hasInvalidBackupOptions(form, request)) throw new Error('备份目标或命名设置不完整');
-      if (environment.triggerKind === 'removable' && form.operation === 'move') {
-        throw new Error('磁盘触发流程禁止自动移动源文件');
-      }
+      if (environment.triggerKind === 'removable' && form.operation === 'move') throw new Error('磁盘触发流程禁止自动移动源文件');
       const summary = await runDitBackup(request);
+      const byPath = assetMap(assets);
+      for (const item of summary.results) {
+        const asset = byPath.get(item.sourcePath);
+        if (!asset) continue;
+        if (item.success && item.outputPaths[0]) {
+          passed.add(asset.id);
+          successful.push({ ...asset, path: item.outputPaths[0] });
+        } else {
+          failed.push(asset);
+          errors.set(asset.id, item.error || '备份或 MD5 校验失败');
+        }
+      }
       state.pass += summary.completedFiles;
       state.fail += summary.failedFiles;
-      state.outputPaths = successfulBackupOutputs(summary);
-      state.paths = successfulBackupPaths(summary, 0);
-      state.pathsAreFiles = true;
-      state.lastBackupVerified = form.verifyMd5
-        && !summary.cancelled
-        && summary.failedFiles === 0
-        && summary.completedFiles > 0;
-      if (summary.cancelled || task.isCancelled()) return;
-      if (summary.failedFiles > 0) {
-        throw new Error(summary.completedFiles > 0
-          ? `部分失败：完成 ${summary.completedFiles}，失败 ${summary.failedFiles}`
-          : `全部失败 (${summary.failedFiles})`);
-      }
-      if (state.paths.length === 0) throw new Error('没有产生可供后续处理的文件');
+      report.push(`备份完成 ${summary.completedFiles}，失败 ${summary.failedFiles}`);
     } else if (node.kind === 'transcode') {
-      const inputs = await resolveWorkflowActionInputs(state, environment);
-      const outputs = await transcodePreset(inputs, preset, environment.agentMode);
-      if (outputs.length === 0) throw new Error('没有产生输出文件');
-      state.paths = outputs;
-      state.pathsAreFiles = true;
-      state.outputPaths = outputs;
-      state.pass += outputs.length;
+      const result = await transcodePreset(assets.map((asset) => asset.path), preset, true);
+      const byPath = assetMap(assets);
+      for (const item of result.items) {
+        const asset = byPath.get(item.sourcePath);
+        if (!asset) continue;
+        if (item.status === 'completed' && item.outputPath) {
+          passed.add(asset.id);
+          successful.push({ ...asset, path: item.outputPath });
+        } else if (item.status === 'failed') {
+          failed.push(asset);
+          errors.set(asset.id, item.error || '转码失败');
+        }
+      }
+      state.pass += result.completed;
+      state.fail += result.failed;
+      report.push(`转码完成 ${result.completed}，失败 ${result.failed}`);
     } else if (node.kind === 'mix') {
-      const inputs = await resolveWorkflowActionInputs(state, environment);
       const params: any = { ...DEFAULT_OUTPUT_FORM, ...preset.params };
-      const outputs = await mixAudio(
-        inputs,
-        params.lnI ?? -24,
-        params.lnTp ?? -2,
-        params.lnLra ?? 7,
-        params.cpTh ?? -27,
-        params.cpGain ?? 5,
-        params.lnOn !== false,
-        params.tpOn !== false,
-        { ...toOutputSettings(params, preset.name), uniqueName: environment.agentMode },
-      );
-      if (outputs.length === 0) throw new Error('没有产生输出文件');
-      state.paths = outputs;
-      state.pathsAreFiles = true;
-      state.outputPaths = outputs;
-      state.pass += outputs.length;
+      const outputs = await mixAudio(assets.map((asset) => asset.path), params.lnI ?? -24, params.lnTp ?? -2, params.lnLra ?? 7, params.cpTh ?? -27, params.cpGain ?? 5, params.lnOn !== false, params.tpOn !== false, { ...toOutputSettings(params, preset.name), uniqueName: true });
+      outputs.forEach((path, index) => {
+        const asset = assets[index];
+        if (!asset) return;
+        passed.add(asset.id);
+        successful.push({ ...asset, path });
+      });
+      assets.filter((asset) => !passed.has(asset.id)).forEach((asset) => { failed.push(asset); errors.set(asset.id, '混音没有产生输出文件'); });
+      state.pass += successful.length;
+      state.fail += failed.length;
+      report.push(`混音完成 ${successful.length}，失败 ${failed.length}`);
     } else {
-      const inputs = await resolveWorkflowActionInputs(state, environment);
       const params: any = preset.params;
       const reference = presets.transcode.find((item) => item.id === params.refEncPresetId);
-      const summary = await checkVideos(
-        inputs,
-        params.fpsTol ?? 0.5,
-        params.recursive !== false,
-        params.blackDetect !== false,
-        reference?.params.scaleW || 0,
-        reference?.params.scaleH || 0,
-        reference?.params.fps || 0,
-        reference?.params.videoCodec || '',
-      );
-      state.pass += summary.pass + summary.pass_with_warnings;
-      state.fail += summary.fail;
-      if (summary.fail > 0) throw new Error(`检测到 ${summary.fail} 个失败项`);
+      for (const asset of assets) {
+        if (task.isCancelled()) break;
+        try {
+          const summary = await checkVideos([asset.path], params.fpsTol ?? 0.5, false, params.blackDetect !== false, reference?.params.scaleW || 0, reference?.params.scaleH || 0, reference?.params.fps || 0, reference?.params.videoCodec || '');
+          if (summary.fail === 0) passed.add(asset.id);
+          else errors.set(asset.id, '未通过检测预设');
+        } catch (error: any) {
+          errors.set(asset.id, String(error?.message || error));
+        }
+      }
+      successful.push(...assets);
+      failed.push(...assets.filter((asset) => !passed.has(asset.id)));
+      state.pass += passed.size;
+      state.fail += failed.length;
+      report.push(`检测通过 ${passed.size}，不通过 ${failed.length}`);
     }
-    if (task.isCancelled()) return;
-    state.lastStepSucceeded = true;
-    workflowLog(task, `${label}完成`, 'pass');
+    workflowLog(task, report[0] || `${label}完成`, errors.size > 0 ? 'warn' : 'pass');
   } catch (error: any) {
-    if (task.isCancelled()) return;
-    state.lastStepSucceeded = false;
-    if (node.kind === 'backup') state.lastBackupVerified = false;
-    if (state.fail === failBefore) state.fail += Math.max(1, state.paths.length);
     const message = String(error?.message || error);
-    workflowLog(task, `${label}失败：${message}`, node.failureMode === 'continue' ? 'warn' : 'fail');
+    for (const asset of assets) if (!passed.has(asset.id)) { failed.push(asset); errors.set(asset.id, message); }
+    state.fail += assets.length;
+    report.push(`${label}失败：${message}`);
+    workflowLog(task, report[report.length - 1], 'warn');
+  } finally {
+    environment.completedActions += 1;
     task.setPass(state.pass);
     task.setFail(state.fail);
-    if (node.failureMode === 'stop') throw new Error(`${label}失败：${message}`);
+    task.setProgress((environment.completedActions / Math.max(1, environment.totalActions)) * 100);
   }
-
-  task.setPass(state.pass);
-  task.setFail(state.fail);
-  task.setProgress((actionIndex / Math.max(1, environment.totalActions)) * 100);
+  return {
+    media: { type: 'media', assets: successful },
+    failed: { type: 'media', assets: [...new Map(failed.map((asset) => [asset.id, asset])).values()] },
+    success: workflowSignals(assets, passed),
+    report: { type: 'report', entries: report },
+    error: { type: 'error', values: errors },
+  };
 }
 
-async function evaluateWorkflowCondition(
-  node: WorkflowConditionNode,
-  state: WorkflowExecutionState,
-  environment: WorkflowExecutionEnvironment,
-): Promise<boolean> {
-  const { condition } = node;
-  try {
-    if (condition.kind === 'last_step_succeeded') return state.lastStepSucceeded;
-    if (condition.kind === 'last_backup_verified') return state.lastBackupVerified;
-    if (condition.kind === 'source_has_media') return sourceContainsMedia(state.paths);
-
-    const preset = findPreset(environment.presets.backup, condition.backupPresetId, '容量判断');
-    const form = normalizeBackupForm(preset.params);
-    const destinations = form.destinations.map((destination) => destination.path.trim()).filter(Boolean);
-    if (destinations.length === 0) return false;
-    const capacity = await evaluateBackupCapacity(
-      state.paths,
-      form,
-      destinations,
-      condition.reservePercent,
-    );
-    const volumeSummary = capacity.checks.map((check) => {
-      const name = check.volume.label.trim() || check.volume.rootPath;
-      const needed = check.requiredBytes + check.reserveBytes;
-      return `${name}: 需要 ${formatWorkflowBytes(needed)} / 可用 ${formatWorkflowBytes(check.volume.availableBytes ?? 0)}`;
-    }).join('；');
-    workflowLog(
-      environment.task,
-      `空间判断 · ${capacity.fileCount} 个文件，共 ${formatWorkflowBytes(capacity.sourceBytes)}${volumeSummary ? ` · ${volumeSummary}` : ''}`,
-      capacity.fits ? 'pass' : 'warn',
-    );
-    return capacity.fits;
-  } catch (error: any) {
-    workflowLog(environment.task, `条件判断失败，按“不满足”处理：${String(error?.message || error)}`, 'warn');
-    return false;
-  }
-}
-
-async function executeWorkflowNodes(
-  nodes: WorkflowNode[],
-  state: WorkflowExecutionState,
-  environment: WorkflowExecutionEnvironment,
-): Promise<void> {
-  for (const node of nodes) {
-    if (environment.task.isCancelled()) return;
-    if (node.type === 'action') {
-      await runWorkflowAction(node, state, environment);
-      continue;
+async function runWorkflowProbe(node: WorkflowGraphProbeNode, sourceAssets: WorkflowAsset[], environment: WorkflowExecutionEnvironment): Promise<WorkflowNodeOutputs> {
+  const assets = await resolveWorkflowAssets(sourceAssets, environment);
+  const values = new Map<string, number>();
+  const errors = new Map<string, string>();
+  await Promise.all(assets.map(async (asset, index) => {
+    if (node.metric === 'list_index' || node.metric === 'reverse_index') {
+      values.set(asset.id, node.metric === 'reverse_index' ? assets.length - index : asset.index + 1 || index + 1);
+      return;
     }
-    const matched = await evaluateWorkflowCondition(node, state, environment);
-    workflowLog(
-      environment.task,
-      `条件“${WORKFLOW_CONDITION_LABELS[node.condition.kind]}”${matched ? '满足' : '不满足'}`,
-      matched ? 'pass' : 'muted',
-    );
-    await executeWorkflowNodes(matched ? node.thenSteps : node.elseSteps, state, environment);
+    try {
+      const info = await getVideoInfo(asset.path);
+      values.set(asset.id, node.metric === 'long_edge' ? Math.max(info.width, info.height) : info.fps);
+    } catch (error: any) {
+      errors.set(asset.id, String(error?.message || error));
+    }
+  }));
+  return { media: { type: 'media', assets }, value: { type: 'number', values }, error: { type: 'error', values: errors } };
+}
+
+async function runWorkflowOutput(node: WorkflowGraphOutputNode, state: WorkflowExecutionState, environment: WorkflowExecutionEnvironment, assets: WorkflowAsset[], inputs: Record<string, WorkflowPortValue>): Promise<WorkflowNodeOutputs> {
+  let outputAssets = assets;
+  const errors = new Map<string, string>();
+  const transfer = (transferAssets: WorkflowAsset[], directory: string, operation: 'copy' | 'move') => runDitBackup({
+    sourcePaths: transferAssets.map((asset) => asset.path),
+    extensions: [],
+    minSizeBytes: null,
+    mediaOnly: false,
+    recursive: false,
+    operation,
+    destinations: [directory],
+    verifyMd5: true,
+    renameTemplate: '',
+    directoryNameTemplate: '',
+    flattenSubdirectories: true,
+    conflictStrategy: 'rename',
+    conflictRenameTemplate: '{name}_{index}',
+    conflictSubdirectory: '',
+    reuseIdentical: operation === 'copy',
+  });
+  if (node.output.mode === 'copy' || node.output.mode === 'move') {
+    if (!node.output.directory.trim()) throw new Error('文件输出节点未选择目录');
+    const summary = await transfer(assets, node.output.directory, node.output.mode);
+    const byPath = assetMap(assets);
+    outputAssets = summary.results.flatMap((item) => {
+      const asset = byPath.get(item.sourcePath);
+      if (!asset || !item.success || !item.outputPaths[0]) {
+        if (asset) errors.set(asset.id, item.error || '文件输出失败');
+        return [];
+      }
+      return [{ ...asset, path: item.outputPaths[0] }];
+    });
+    state.pass += summary.completedFiles;
+    state.fail += summary.failedFiles;
+  } else if (node.output.mode === 'restore') {
+    outputAssets = [];
+    for (const asset of assets) {
+      const directory = asset.sourcePath.replace(/[\\/][^\\/]+$/, '');
+      if (!directory || directory === asset.sourcePath) {
+        errors.set(asset.id, '无法确定原素材目录');
+        state.fail += 1;
+        continue;
+      }
+      const summary = await transfer([asset], directory, 'move');
+      const item = summary.results[0];
+      if (item?.success && item.outputPaths[0]) outputAssets.push({ ...asset, path: item.outputPaths[0] });
+      else errors.set(asset.id, item?.error || '返回原素材目录失败');
+      state.pass += summary.completedFiles;
+      state.fail += summary.failedFiles;
+    }
   }
+  const paths = outputAssets.map((asset) => asset.path);
+  appendWorkflowOutputs(state, paths);
+  const entries = (inputs.report as WorkflowReportValue | undefined)?.entries ?? [];
+  workflowLog(environment.task, `文件输出完成 · 收集 ${paths.length} 个文件`, 'pass');
+  const reportEntries = [...entries, `文件输出 ${paths.length} 个`];
+  if (node.output.writeLog) {
+    if (!node.output.directory.trim()) throw new Error('输出流程日志前必须选择目录');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const lines = environment.task.logs.map((entry) => `[${entry.tone || 'normal'}] ${entry.message}`);
+    const logPath = await writeWorkflowLog(node.output.directory, `shadowencoder-workflow-${timestamp}.log`, [...lines, ...reportEntries].join('\r\n'));
+    appendWorkflowOutputs(state, [logPath]);
+    reportEntries.push(`日志：${logPath}`);
+  }
+  return { media: { type: 'media', assets: outputAssets }, report: { type: 'report', entries: reportEntries }, error: { type: 'error', values: errors } };
+}
+
+async function executeWorkflowGraph(graph: WorkflowGraph, state: WorkflowExecutionState, environment: WorkflowExecutionEnvironment): Promise<void> {
+  const result = await executeWorkflowGraphDAG(graph, state.paths, {
+    runAction: (node, assets) => runWorkflowAction(node, state, environment, assets),
+    runProbe: (node, assets) => runWorkflowProbe(node, assets, environment),
+    runOutput: (node, assets, inputs) => runWorkflowOutput(node, state, environment, assets, inputs),
+    isCancelled: environment.task.isCancelled,
+  });
+  for (const message of result.errors.values.values()) workflowLog(environment.task, message, 'warn');
 }
 
 export function DitWorkflowTab() {
@@ -1037,6 +1095,7 @@ export function DitWorkflowTab() {
   const [resultView, setResultView] = useResultView(task.running);
   const [workflow, setWorkflow] = useState<WorkflowDefinition>(() => normalizeWorkflowDefinition({}));
   const [workflowName, setWorkflowName] = useState('');
+  const [workflowEditorKey, setWorkflowEditorKey] = useState(0);
   const backupPresets = usePresets('backup').presets;
   const encodePresets = usePresets('encode').presets;
   const mixPresets = usePresets('mix').presets;
@@ -1073,15 +1132,12 @@ export function DitWorkflowTab() {
     }
     if (sourcePaths.length === 0) throw new Error('没有可用于流程的素材');
 
-    const counts = workflowNodeCounts(definition.steps);
+    const counts = workflowDefinitionNodeCounts(definition);
     const state: WorkflowExecutionState = {
       paths: sourcePaths,
-      pathsAreFiles: false,
       outputPaths: [],
       pass: 0,
       fail: 0,
-      lastStepSucceeded: false,
-      lastBackupVerified: false,
     };
     const environment: WorkflowExecutionEnvironment = {
       task,
@@ -1089,6 +1145,7 @@ export function DitWorkflowTab() {
       triggerKind: definition.trigger.kind,
       agentMode: false,
       totalActions: counts.actions,
+      startedActions: 0,
       completedActions: 0,
       resolveMediaPaths: definition.trigger.kind === 'manual'
         ? fl.resolveLeafPaths
@@ -1097,9 +1154,9 @@ export function DitWorkflowTab() {
           minSizeMb: 0,
           mediaOnly: true,
           recursive: true,
-        })).map((file) => file.path),
+        })).map((file) => file.path).sort((left, right) => left.replace(/\\/g, '/').localeCompare(right.replace(/\\/g, '/'))),
     };
-    await executeWorkflowNodes(definition.steps, state, environment);
+    await executeWorkflowGraph(definition.graph, state, environment);
     if (task.isCancelled()) {
       task.setOutputPaths([]);
     } else {
@@ -1130,15 +1187,12 @@ export function DitWorkflowTab() {
     if (agentTask.inputPaths.length === 0) throw new Error('没有可用于流程的素材');
     workflowLog(task, `Agent 启动流程：${preset.name}`);
 
-    const counts = workflowNodeCounts(definition.steps);
+    const counts = workflowDefinitionNodeCounts(definition);
     const state: WorkflowExecutionState = {
       paths: [...agentTask.inputPaths],
-      pathsAreFiles: false,
       outputPaths: [],
       pass: 0,
       fail: 0,
-      lastStepSucceeded: false,
-      lastBackupVerified: false,
     };
     const environment: WorkflowExecutionEnvironment = {
       task,
@@ -1146,10 +1200,11 @@ export function DitWorkflowTab() {
       triggerKind: 'manual',
       agentMode: true,
       totalActions: counts.actions,
+      startedActions: 0,
       completedActions: 0,
       resolveMediaPaths: fl.resolveLeafPaths,
     };
-    await executeWorkflowNodes(definition.steps, state, environment);
+    await executeWorkflowGraph(definition.graph, state, environment);
     const outputPaths = task.isCancelled() ? [] : state.outputPaths;
     task.setOutputPaths(outputPaths);
     const detail = task.isCancelled()
@@ -1166,6 +1221,13 @@ export function DitWorkflowTab() {
     task,
   ]);
 
+  const graphIssue = workflowGraphIssues(workflow.graph)[0];
+  const workflowCanvasIssue = validationIssues[0] && validationIssues[0] !== graphIssue
+    ? validationIssues[0]
+    : !validationIssues[0] && workflow.trigger.kind === 'manual' && inputPaths.length === 0
+      ? '素材列表中没有可执行的素材'
+      : undefined;
+
   return (
     <ToolWorkspace
       taskFailure={task.error ? { message: task.error, logs: task.logs, onClose: task.clearError } : undefined}
@@ -1177,17 +1239,13 @@ export function DitWorkflowTab() {
             onApply={(params, presetName) => {
               setWorkflow(normalizeWorkflowDefinition(params));
               setWorkflowName(presetName || '');
+              setWorkflowEditorKey((current) => current + 1);
             }}
             initialValues={workflow}
             currentParams={workflow}
             renderBuilder={(ctx) => <WorkflowPresetBuilder ctx={ctx} initial={workflow} />}
           />
-          <WorkflowEditor value={workflow} onChange={setWorkflow} disabled={task.running} />
-          {(validationIssues[0] || (workflow.trigger.kind === 'manual' && inputPaths.length === 0)) && (
-            <div className="se-workflow-validation">
-              {validationIssues[0] || '素材列表中没有可执行的素材'}
-            </div>
-          )}
+          <WorkflowEditor key={workflowEditorKey} value={workflow} onChange={setWorkflow} disabled={task.running} issue={workflowCanvasIssue} />
         </>
       )}
       actions={(

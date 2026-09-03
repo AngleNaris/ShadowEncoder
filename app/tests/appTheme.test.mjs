@@ -135,12 +135,13 @@ test('高对比度通过亮度算法提升文字对比度而不是使用固定�
 });
 
 test('Logo 打开应用设置，主题基础设施不改变默认暗色 token', async () => {
-  const [app, main, provider, css, muiTheme] = await Promise.all([
+  const [app, main, provider, css, muiTheme, ui] = await Promise.all([
     readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/AppThemeProvider.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/styles/theme.css', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/muiTheme.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/ui.tsx', import.meta.url), 'utf8'),
   ]);
 
   assert.match(app, /className="se-rail-brand"[\s\S]*onClick=\{openSettings\}/);
@@ -197,5 +198,12 @@ test('Logo 打开应用设置，主题基础设施不改变默认暗色 token', 
   assert.match(css, /\.se-settings-swatch:hover:not\(:disabled\) \{ background: var\(--swatch-color\); \}/);
   assert.match(css, /\.se-settings-dialog \.se-dialog-foot > button \{[\s\S]*width: 100%;[\s\S]*justify-content: center;/);
   assert.match(css, /\.se-settings-dialog \.se-dialog-foot > button > svg \{ top: 0; \}/);
+  assert.match(css, /\.se-context-menu button\s*\{[^}]*justify-content:\s*flex-start;[^}]*text-align:\s*left;/);
+  assert.match(css, /\.se-context-menu-group-label\s*\{[^}]*text-align:\s*left;/);
+  assert.match(css, /\.se-group-head-toggle\s*\{[^}]*justify-content:\s*flex-start;[^}]*text-align:\s*left;/);
+  assert.match(css, /\.se-context-menu\s*\{[^}]*animation:\s*se-context-menu-in 140ms/);
+  assert.match(css, /\.se-context-menu\.is-closing\s*\{[^}]*animation:\s*se-context-menu-out 120ms/);
+  assert.match(ui, /className=\{`se-context-menu\$\{open \? '' : ' is-closing'\}`\}/);
+  assert.match(ui, /onAnimationEnd=\{\(event\) => \{[\s\S]*setMounted\(false\)/);
   assert.match(muiTheme, /export function createMuiTheme\([\s\S]*accentColor = DEFAULT_THEME_ACCENT/);
 });

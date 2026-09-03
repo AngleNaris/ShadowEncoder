@@ -30,8 +30,8 @@ import {
 } from '../lib/presetUiRules';
 import {
   normalizeWorkflowDefinition,
-  workflowNodeCounts,
 } from '../lib/workflow';
+import { workflowDefinitionNodeCounts } from '../lib/workflowGraph';
 import {
   PRESET_STORAGE_KEY,
   clonePresets,
@@ -1060,6 +1060,7 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
   const p = params;
   let rows: PresetCardRow[];
   if (type === 'encode') {
+    const isAudioOutput = p.outputKind === 'audio' || p.audioOnly;
     const codecLabel = (VIDEO_CODEC_LABEL[p.videoCodec] as string) || p.videoCodec || '—';
     const prof = p.videoProfile ? ` / ${p.videoProfile}` : '';
     const scaleMode = p.scaleMode || (p.keepRes ? 'original' : ((p.scaleW && p.scaleH) ? 'dimensions' : 'original'));
@@ -1090,28 +1091,35 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
     const aLabel = (AUDIO_CODEC_LABEL[p.audioCodec] as string) || p.audioCodec || '—';
     let abr = '—';
     if (p.videoCodec === 'gif') abr = '无音频轨';
-    else if (p.audioOnly) abr = '仅输出音频';
     else if (p.noAudio) abr = '不输出音轨';
     else if (p.audioCodec === 'copy') abr = '复制音频流';
     else if (p.audioBitrate > 0) abr = `${p.audioBitrate} kbps`;
-    rows = [
-      { k: '封装', v: (p.container || '—').toUpperCase() },
-      { k: '视频', v: `${codecLabel}${prof}` },
-      { k: 'Level', v: p.videoLevel || '自动' },
-      { k: mode === 'filesize' ? '目标体积' : (mode === 'bitrate' ? '质量' : '质量'), v: q },
-      { k: '视频码率', v: vbr },
-      { k: '分辨率', v: res },
-      { k: '帧率', v: p.fps != null ? `${p.fps} fps` : '—' },
-      { k: '音频', v: aLabel },
-      { k: '音频码率', v: abr },
-      { k: '锐化', v: String(p.unsharp ?? '—') },
-      { k: '降噪', v: String(p.denoise ?? '—') },
-      { k: '去块', v: String(p.deblock ?? '—') },
-      { k: '调优', v: p.tune && p.tune !== 'none' ? p.tune : '无' },
-      { k: '2-pass 编码', v: p.twoPass ? '开启' : '关闭' },
-      { k: '进度预览', v: p.previewDuringEncode === false ? '关闭' : '开启' },
-      { k: '存储位置', v: describeOutputSettings(p) },
-    ];
+    rows = isAudioOutput
+      ? [
+          { k: '音频格式', v: (p.container || '—').toUpperCase() },
+          { k: '音频', v: aLabel },
+          { k: '音频码率', v: abr },
+          { k: '进度预览', v: p.previewDuringEncode === false ? '关闭' : '开启' },
+          { k: '存储位置', v: describeOutputSettings(p) },
+        ]
+      : [
+          { k: '封装', v: (p.container || '—').toUpperCase() },
+          { k: '视频', v: `${codecLabel}${prof}` },
+          { k: 'Level', v: p.videoLevel || '自动' },
+          { k: mode === 'filesize' ? '目标体积' : (mode === 'bitrate' ? '质量' : '质量'), v: q },
+          { k: '视频码率', v: vbr },
+          { k: '分辨率', v: res },
+          { k: '帧率', v: p.fps != null ? `${p.fps} fps` : '—' },
+          { k: '音频', v: aLabel },
+          { k: '音频码率', v: abr },
+          { k: '锐化', v: String(p.unsharp ?? '—') },
+          { k: '降噪', v: String(p.denoise ?? '—') },
+          { k: '去块', v: String(p.deblock ?? '—') },
+          { k: '调优', v: p.tune && p.tune !== 'none' ? p.tune : '无' },
+          { k: '2-pass 编码', v: p.twoPass ? '开启' : '关闭' },
+          { k: '进度预览', v: p.previewDuringEncode === false ? '关闭' : '开启' },
+          { k: '存储位置', v: describeOutputSettings(p) },
+        ];
   } else if (type === 'mix') {
     // 混音：开关关闭时隐藏对应子参数，卡片始终反映实际生效项
     rows = [];
@@ -1133,7 +1141,7 @@ export function PresetCard({ type, params }: { type: PresetType; params: Record<
     rows.push({ k: '存储位置', v: describeOutputSettings(p) });
   } else if (type === 'workflow') {
     const workflow = normalizeWorkflowDefinition(p);
-    const counts = workflowNodeCounts(workflow.steps);
+    const counts = workflowDefinitionNodeCounts(workflow);
     rows = [
       { k: '触发方式', v: workflow.trigger.kind === 'removable' ? '新接入磁盘' : '手动执行' },
       { k: '执行步骤', v: `${counts.actions} 个` },
@@ -1238,6 +1246,8 @@ export function PresetManager({ type, onApply, builderTitle, initialValues, curr
   const [selId, setSelId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [closing, setClosing] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const summaryId = React.useId();
   const onApplyRef = useRef(onApply);
   const appliedPresetRef = useRef('');
 
@@ -1363,23 +1373,42 @@ export function PresetManager({ type, onApply, builderTitle, initialValues, curr
   const builder = renderBuilder
     ? renderBuilder(ctx)
     : <GenericPresetBuilder type={type} ctx={ctx} initial={initialValues} />;
+  const summaryParams = currentParams ?? sel?.params ?? null;
 
   return (
-    <div className="se-preset-panel">
-      <div className="se-panel-head">
-        <span className="se-panel-title">{builderTitle ?? '预设管理'}</span>
-        <span className="se-count-chip">{presets.length}</span>
-      </div>
-      <div className="se-preset-panel-body">
-        <ui.ComboBox value={selId ?? ''} options={options} onChange={onPick} placeholder="未选择预设" />
-        <PresetCard type={type} params={currentParams ?? sel?.params ?? null} />
-      </div>
-      <div className="se-preset-foot">
-        <ui.Button className="se-btn-new" onClick={() => { setClosing(false); setOpen(true); }} icon={<IconSettings size={15} className="se-preset-manage-icon" />} title="管理预设">管理预设</ui.Button>
-        <ui.Button className="se-btn-new" onClick={onUpdateCurrent} disabled={!currentParams} icon={<IconCheckShield size={15} />} title={selId ? '将面板当前的实时参数保存到所选预设' : '将面板当前的实时参数保存为新预设'}>{selId ? '更新当前预设' : '保存为预设'}</ui.Button>
-      </div>
+    <>
+      <ui.ParamGroup
+        title={builderTitle ?? '预设管理'}
+        aside={<span className="se-count-chip">{presets.length}</span>}
+      >
+        <div className="se-preset-panel-body">
+          <ui.ComboBox value={selId ?? ''} options={options} onChange={onPick} placeholder="未选择预设" />
+          <button
+            type="button"
+            className={`se-preset-summary-toggle${summaryOpen ? ' is-open' : ''}`}
+            aria-expanded={summaryOpen}
+            aria-controls={summaryId}
+            disabled={!summaryParams}
+            onClick={() => setSummaryOpen((current) => !current)}
+          >
+            <span>已选参数</span>
+            <IconPlus size={13} />
+          </button>
+          {summaryParams && (
+            <ui.AnimatedCollapse open={summaryOpen}>
+              <div id={summaryId}>
+                <PresetCard type={type} params={summaryParams} />
+              </div>
+            </ui.AnimatedCollapse>
+          )}
+        </div>
+        <div className="se-preset-foot">
+          <ui.Button className="se-btn-new" onClick={() => { setClosing(false); setOpen(true); }} icon={<IconSettings size={15} className="se-preset-manage-icon" />} title="管理预设">管理预设</ui.Button>
+          <ui.Button className="se-btn-new" onClick={onUpdateCurrent} disabled={!currentParams} icon={<IconCheckShield size={15} />} title={selId ? '将面板当前的实时参数保存到所选预设' : '将面板当前的实时参数保存为新预设'}>{selId ? '更新当前预设' : '保存为预设'}</ui.Button>
+        </div>
+      </ui.ParamGroup>
       {builder}
-    </div>
+    </>
   );
 }
 

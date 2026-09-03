@@ -1,7 +1,7 @@
 ---
 name: shadowencoder-cli
 description: Operate a running ShadowEncoder instance through its reversible, user-visible local CLI. Use it to inspect media queues, edit presets one field at a time, compose DIT workflows, request supported non-destructive jobs, monitor events, and undo Agent operations.
-version: 1
+version: 2
 ---
 
 # ShadowEncoder Agent CLI
@@ -12,7 +12,7 @@ Use `shadowencoder-cli` only with an already running ShadowEncoder application. 
 
 1. Run `shadowencoder-cli status --json` before the first operation.
 2. Run the relevant `show --json` command before a mutation and use its exact current `revision`.
-3. Change exactly one field, one list item, one source, or one workflow step per command.
+3. Change exactly one field, one list item, one source, one workflow node, or one workflow edge per command.
 4. Never look for batch mutation, JSON Patch, import, whole-object replacement, arbitrary FFmpeg arguments, shell execution, overwrite, source deletion, or DIT move behavior. These capabilities are intentionally unavailable.
 5. After each write, retain `operationId`, `sequence`, `entityRevision`, and `reversible` from the receipt.
 6. On `REVISION_CONFLICT`, read the target again and reassess. Never retry with a guessed revision.
@@ -82,14 +82,23 @@ Add one existing path per command. Do not use globs or multiple paths. A task ca
 ## Workflow Commands
 
 ```text
-shadowencoder-cli workflow step-add <workflow-id> <kind> --revision <n>
-shadowencoder-cli workflow step-add <workflow-id> <kind> --revision <n> --parent <condition-id> --branch then|else
-shadowencoder-cli workflow step-set <workflow-id> <step-id> <field> <value> --revision <n>
-shadowencoder-cli workflow step-remove <workflow-id> <step-id> --revision <n>
-shadowencoder-cli workflow step-move <workflow-id> <step-id> <after-step-id> --revision <n>
+shadowencoder-cli preset create --type workflow --name <name>
+shadowencoder-cli workflow node-add <workflow-id> <kind> --revision <n>
+shadowencoder-cli workflow node-set <workflow-id> <node-id> <field> <value> --revision <n>
+shadowencoder-cli workflow node-remove <workflow-id> <node-id> --revision <n>
+shadowencoder-cli workflow edge-add <workflow-id> <source> <source-port> <target> <target-port> --revision <n>
+shadowencoder-cli workflow edge-remove <workflow-id> <edge-id> --revision <n>
 ```
 
-Action kinds are `backup`, `transcode`, `mix`, and `check`. Use `condition` or `condition:<condition-kind>` for a condition node. `step-move` only reorders within one branch; use `-` as `<after-step-id>` to move to the beginning.
+Node kinds are:
+
+- Actions: `backup`, `transcode`, `mix`, `check`
+- Filter: `filter`
+- Probes: `long_edge`, `frame_rate`, `list_index`, `reverse_index`
+- Logic: `count`, `math`, `compare`, `boolean`
+- Routing/output: `gate`, `output`
+
+Read `workflowNodeFields` and `workflowEdgeFields` from `schema show workflow`. The movable input node has the fixed ID `__workflow_start__` and output port `media`; it cannot be removed. An output port can fan out to multiple targets. Edge creation rejects unknown or mismatched ports, duplicate edges, self-connections, and cycles.
 
 ## Task Commands
 

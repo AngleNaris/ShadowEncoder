@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.2"><strong>下载 v2.2.2</strong></a>
+  <a href="https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.6"><strong>下载 v2.2.6</strong></a>
   &nbsp;·&nbsp;
   <a href="./docs/agent-cli-design.md">Agent CLI</a>
   &nbsp;·&nbsp;
@@ -90,9 +90,9 @@ shadowencoder-cli help
 
 | 文件 | 适合谁 |
 | --- | --- |
-| `ShadowEncoder_2.2.2_x64-portable.exe` | 单文件便携版，图省事的话选它——ShadowEncoder、Gifski、FFmpeg、FFprobe、libmpv 和 CLI 全打包在里面了 |
-| `ShadowEncoder_2.2.2_x64-setup.exe` | 常规的 Windows 安装程序 |
-| `ShadowEncoder_2.2.2_x64_en-US.msi` | 走 Windows Installer 部署时用 |
+| `ShadowEncoder_2.2.6_x64-portable.exe` | 单文件便携版，图省事的话选它——ShadowEncoder、Gifski、FFmpeg、FFprobe、libmpv 和 CLI 全打包在里面了 |
+| `ShadowEncoder_2.2.6_x64-setup.exe` | 常规的 Windows 安装程序 |
+| `ShadowEncoder_2.2.6_x64_en-US.msi` | 走 Windows Installer 部署时用 |
 
 便携版启动时会把运行时静默解到临时目录，程序退出后自动清理，不会在系统里留下一堆东西。WebView2 用的是 Windows 10/11 自带的系统运行时（Tauri 需要它）。
 
@@ -100,7 +100,7 @@ shadowencoder-cli help
 
 ## 自己构建
 
-先把这些准备好：Node.js 18+、Rust stable、Visual Studio 2022 Build Tools、FFmpeg，以及 64 位的 libmpv。然后把 FFmpeg 放进 `ffmpeg/win/`，mpv 开发包放进 `mpv/win/64/`。
+先把这些准备好：Node.js 18+、Rust stable、Visual Studio 2022 Build Tools、FFmpeg 9.0，以及 64 位的 libmpv。将 gyan.dev 的 Windows 64 位 essentials 构建中的 `ffmpeg.exe` 和 `ffprobe.exe` 放进 `ffmpeg/win/`，mpv 开发包放进 `mpv/win/64/`。打包脚本会拒绝非 FFmpeg 9.x 的输入。版本来源、校验值和 AI/DNN 能力边界见 [`docs/ffmpeg.md`](./docs/ffmpeg.md)。
 
 ```powershell
 cd app

@@ -21,7 +21,8 @@ const OUTPUT_FIELDS: [&str; 4] = [
     "outputDirectory",
 ];
 
-const ENCODE_FIELDS: [&str; 36] = [
+const ENCODE_FIELDS: [&str; 37] = [
+    "outputKind",
     "container",
     "videoCodec",
     "videoProfile",
@@ -134,8 +135,9 @@ const NUMBER_FIELDS: [&str; 13] = [
     "trigger.settleSeconds",
 ];
 
-const CONTAINERS: [&str; 13] = [
+const CONTAINERS: [&str; 19] = [
     "mp4", "mkv", "mov", "webm", "avi", "flv", "ts", "mpeg", "wmv", "ogv", "3gp", "asf", "m4v",
+    "mp3", "m4a", "wav", "flac", "ogg", "opus",
 ];
 const VIDEO_CODECS: [&str; 21] = [
     "copy",
@@ -279,13 +281,7 @@ fn field_allowed(preset_type: &str, field: &str) -> bool {
         "screenshot" => {
             matches!(
                 field,
-                "aspect"
-                    | "customRatio"
-                    | "w"
-                    | "h"
-                    | "imageFormat"
-                    | "quality"
-                    | "pngCompression"
+                "aspect" | "customRatio" | "w" | "h" | "imageFormat" | "quality" | "pngCompression"
             ) || output
         }
         "segment" => {
@@ -399,6 +395,7 @@ fn validate_number_range(field: &str, value: f64) -> Result<(), String> {
 fn allowed_values(field: &str) -> Option<&'static [&'static str]> {
     match field {
         "container" => Some(&CONTAINERS),
+        "outputKind" => Some(&["video", "audio"]),
         "videoCodec" => Some(&VIDEO_CODECS),
         "audioCodec" => Some(&AUDIO_CODECS),
         "rateMode" => Some(&["crf", "capped", "bitrate", "filesize"]),
@@ -459,6 +456,9 @@ fn field_definition(field: &str) -> Value {
     } else if field == "style" {
         definition.insert("deprecated".into(), json!(true));
         definition.insert("replacement".into(), json!("tune"));
+    } else if field == "audioOnly" {
+        definition.insert("deprecated".into(), json!(true));
+        definition.insert("replacement".into(), json!("outputKind"));
     }
 
     Value::Object(definition)
@@ -506,9 +506,9 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
             "quality",
             "pngCompression",
         ]
-            .into_iter()
-            .chain(OUTPUT_FIELDS)
-            .collect(),
+        .into_iter()
+        .chain(OUTPUT_FIELDS)
+        .collect(),
         "segment" => [
             "aspect",
             "customRatio",
@@ -586,8 +586,18 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
         "scalarFields": scalar_fields,
         "fieldDefinitions": field_definitions,
         "listFields": list_fields,
-        "workflowStepFields": if preset_type == "workflow" {
-            json!(["kind", "presetId", "presetRevision", "failureMode", "condition.kind", "condition.backupPresetId", "condition.reservePercent"])
+        "workflowNodeKinds": if preset_type == "workflow" {
+            json!(["backup", "transcode", "mix", "check", "filter", "long_edge", "frame_rate", "list_index", "reverse_index", "count", "math", "compare", "boolean", "gate", "output"])
+        } else {
+            json!([])
+        },
+        "workflowNodeFields": if preset_type == "workflow" {
+            json!(["presetId", "presetRevision", "filter.mediaKind", "filter.nameIncludes", "metric", "logic.value", "logic.mathOperator", "logic.compareOperator", "logic.booleanOperator", "output.mode", "output.directory", "output.writeLog", "position.x", "position.y"])
+        } else {
+            json!([])
+        },
+        "workflowEdgeFields": if preset_type == "workflow" {
+            json!(["source", "sourcePort", "target", "targetPort"])
         } else {
             json!([])
         },
@@ -617,6 +627,24 @@ mod tests {
     #[test]
     fn arbitrary_codec_is_rejected() {
         assert!(validate_scalar_field("encode", "videoCodec", &json!("-filter_complex")).is_err());
+    }
+
+    #[test]
+    fn workflow_schema_describes_graph_nodes_and_edges() {
+        let schema = schema_show("workflow").unwrap();
+        assert!(schema["workflowNodeKinds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("transcode")));
+        assert!(schema["workflowNodeFields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("output.directory")));
+        assert_eq!(
+            schema["workflowEdgeFields"],
+            json!(["source", "sourcePort", "target", "targetPort"])
+        );
+        assert!(schema.get("workflowStepFields").is_none());
     }
 
     #[test]
@@ -669,6 +697,12 @@ mod tests {
         assert_eq!(fields["style"]["maximum"], 2);
         assert_eq!(fields["style"]["deprecated"], true);
         assert_eq!(fields["style"]["replacement"], "tune");
+        assert_eq!(
+            fields["outputKind"]["allowedValues"],
+            json!(["video", "audio"])
+        );
+        assert_eq!(fields["audioOnly"]["deprecated"], true);
+        assert_eq!(fields["audioOnly"]["replacement"], "outputKind");
     }
 
     #[test]
@@ -681,6 +715,9 @@ mod tests {
     #[test]
     fn encode_schema_accepts_capped_rate_scaling_audio_and_filter_fields() {
         assert!(validate_scalar_field("encode", "rateMode", &json!("capped")).is_ok());
+        assert!(validate_scalar_field("encode", "outputKind", &json!("audio")).is_ok());
+        assert!(validate_scalar_field("encode", "outputKind", &json!("podcast")).is_err());
+        assert!(validate_scalar_field("encode", "container", &json!("flac")).is_ok());
         assert!(validate_scalar_field("encode", "scaleMode", &json!("longEdge")).is_ok());
         assert!(validate_scalar_field("encode", "scaleEdge", &json!(4096)).is_ok());
         assert!(validate_scalar_field("encode", "maxrate", &json!(80_000)).is_ok());

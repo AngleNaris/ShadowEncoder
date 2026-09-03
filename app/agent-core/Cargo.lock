@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "shadowencoder-agent-core"
-version = "2.2.5"
+version = "2.2.6"
 dependencies = [
  "md-5",
  "rusqlite",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "shadowencoder-agent-protocol"
-version = "2.2.5"
+version = "2.2.6"
 dependencies = [
  "serde",
  "serde_json",

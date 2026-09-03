@@ -37,16 +37,20 @@ test('编码与导出选项不再把附加说明拼进主文字', async () => {
   assert.match(presets, /label: p\.name,[\s\S]*tags: p\.params\.container \? \[String\(p\.params\.container\)\.toUpperCase\(\)\]/);
 });
 
-test('DIT 与流程选项把动作和分类放入标签', async () => {
-  const [dit, workflow] = await Promise.all([
+test('DIT 选项与流程画布保留动作分类和类型化连线端口', async () => {
+  const [dit, workflow, graph] = await Promise.all([
     readFile(new URL('../src/components/DitTabs.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/WorkflowEditor.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/workflowGraph.ts', import.meta.url), 'utf8'),
   ]);
 
   assert.match(dit, /label: '复制', value: 'copy', tags: \['保留源文件'\]/);
   assert.match(dit, /label: '移动', value: 'move', tags: \['成功后删除源文件'\]/);
-  assert.match(workflow, /tags: \['执行', \.\.\.option\.tags\]/);
-  assert.match(workflow, /label: '条件判断', value: 'condition', tags: \['逻辑'\]/);
-  assert.match(workflow, /options=\{addOptions\}[\s\S]*menuTagAreaWidth=\{68\}/);
-  assert.doesNotMatch(workflow, /label: `执行 ·|label: '逻辑 · 条件判断'/);
+  assert.match(workflow, /\['backup', 'transcode', 'mix', 'check'\] as WorkflowActionKind\[\]/);
+  assert.match(workflow, /const handleId = `\$\{kind === 'source' \? 'out' : 'in'\}:\$\{port\.id\}`;[\s\S]*<Handle[\s\S]*id=\{handleId\}/);
+  assert.match(workflow, /onConnect=\{connect\}/);
+  assert.match(workflow, /connectWorkflowGraph\(graph, connection\.source, sourcePort, connection\.target, targetPort\)/);
+  assert.match(workflow, /connectionRadius=\{30\}/);
+  assert.match(graph, /WorkflowPortType = 'media' \| 'bool' \| 'number' \| 'report' \| 'error'/);
+  assert.doesNotMatch(workflow, /options=\{addOptions\}/);
 });

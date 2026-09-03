@@ -121,32 +121,32 @@ pub enum AgentCommand {
         active_path: Option<String>,
     },
 
-    #[serde(rename = "workflow.step_add")]
-    WorkflowStepAdd {
+    #[serde(rename = "workflow.node_add")]
+    WorkflowNodeAdd { workflow_id: String, kind: String },
+    #[serde(rename = "workflow.node_set")]
+    WorkflowNodeSet {
         workflow_id: String,
-        kind: String,
-        #[serde(default)]
-        parent_id: Option<String>,
-        #[serde(default)]
-        branch: Option<String>,
-    },
-    #[serde(rename = "workflow.step_set")]
-    WorkflowStepSet {
-        workflow_id: String,
-        step_id: String,
+        node_id: String,
         field: String,
         value: Value,
     },
-    #[serde(rename = "workflow.step_remove")]
-    WorkflowStepRemove {
+    #[serde(rename = "workflow.node_remove")]
+    WorkflowNodeRemove {
         workflow_id: String,
-        step_id: String,
+        node_id: String,
     },
-    #[serde(rename = "workflow.step_move")]
-    WorkflowStepMove {
+    #[serde(rename = "workflow.edge_add")]
+    WorkflowEdgeAdd {
         workflow_id: String,
-        step_id: String,
-        after_step_id: String,
+        source: String,
+        source_port: String,
+        target: String,
+        target_port: String,
+    },
+    #[serde(rename = "workflow.edge_remove")]
+    WorkflowEdgeRemove {
+        workflow_id: String,
+        edge_id: String,
     },
 
     #[serde(rename = "task.list")]

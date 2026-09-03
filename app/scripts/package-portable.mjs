@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { delimiter, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifyFfmpegDirectory } from './verify-ffmpeg.mjs';
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(appRoot, '..');
@@ -32,6 +33,8 @@ for (const [name, path] of Object.entries(inputs)) {
     throw new Error(`Portable package input is missing (${name}): ${path}`);
   }
 }
+
+verifyFfmpegDirectory(releaseRoot, '便携版打包输入');
 
 function findMakensis() {
   const executable = process.platform === 'win32' ? 'makensis.exe' : 'makensis';

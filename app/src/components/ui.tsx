@@ -1,6 +1,7 @@
 // ShadowEncoder 复刻组件库 —— 1:1 对应原 PySide6 组件
 // 配色 / 无圆角 / 过渡 全部沿用 theme.css 的设计 token
 import React, { ReactNode, useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import FormControl from '@mui/material/FormControl';
 import Select from '@mui/material/Select';
 import MenuItem from '@mui/material/MenuItem';
@@ -54,19 +55,151 @@ export function InfoCard({ title, children }: { title: string; children: ReactNo
 }
 
 /* ── 参数分组卡片（参数面板的基本组织单元） ────────────────── */
-export function ParamGroup({ title, aside, children }: {
+export type ContextMenuItem = {
+  label: string;
+  groupLabel?: string;
+  onSelect: () => void;
+  icon?: ReactNode;
+  disabled?: boolean;
+  danger?: boolean;
+  separatorBefore?: boolean;
+};
+
+export function ContextMenu({ open, x, y, items, onClose }: {
+  open: boolean;
+  x: number;
+  y: number;
+  items: ContextMenuItem[];
+  onClose: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const lastItemsRef = useRef(items);
+  const [mounted, setMounted] = useState(open);
+  const [position, setPosition] = useState({ x, y, originX: 0, originY: 0 });
+  if (open) lastItemsRef.current = items;
+
+  useEffect(() => {
+    if (open) setMounted(true);
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !mounted) return;
+    const menu = menuRef.current;
+    if (!menu) return;
+    const bounds = menu.getBoundingClientRect();
+    const nextX = Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8));
+    const nextY = Math.max(8, Math.min(y, window.innerHeight - bounds.height - 8));
+    setPosition({
+      x: nextX,
+      y: nextY,
+      originX: Math.max(0, Math.min(bounds.width, x - nextX)),
+      originY: Math.max(0, Math.min(bounds.height, y - nextY)),
+    });
+    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  }, [mounted, open, x, y]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = () => onClose();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('blur', close);
+    window.addEventListener('resize', close);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('blur', close);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [onClose, open]);
+
+  if (!mounted) return null;
+  return createPortal(
+    <div
+      ref={menuRef}
+      className={`se-context-menu${open ? '' : ' is-closing'}`}
+      role="menu"
+      aria-label="快捷菜单"
+      style={{
+        left: position.x,
+        top: position.y,
+        '--se-context-menu-origin-x': `${position.originX}px`,
+        '--se-context-menu-origin-y': `${position.originY}px`,
+      } as React.CSSProperties}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+      onAnimationEnd={(event) => {
+        if (!open && event.target === event.currentTarget) setMounted(false);
+      }}
+    >
+      {(open ? items : lastItemsRef.current).map((item, index) => (
+        <React.Fragment key={`${item.label}-${index}`}>
+          {item.groupLabel && <div className="se-context-menu-group-label" role="presentation">{item.groupLabel}</div>}
+          <button
+            type="button"
+            role="menuitem"
+            className={`${item.danger ? ' is-danger' : ''}${item.separatorBefore ? ' has-separator' : ''}`}
+            disabled={item.disabled}
+            onClick={() => {
+              item.onSelect();
+              onClose();
+            }}
+          >
+            {item.icon && <span className="se-context-menu-icon">{item.icon}</span>}
+            <span>{item.label}</span>
+          </button>
+        </React.Fragment>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+
+export function ParamGroup({ title, aside, children, defaultOpen = true }: {
   title: string;
   /** 标题行右侧内容（开关、徽标等） */
   aside?: ReactNode;
   children: ReactNode;
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const bodyId = React.useId();
   return (
-    <section className="se-group">
+    <section
+      className={`se-group${open ? ' is-open' : ' is-collapsed'}`}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       <header className="se-group-head">
-        <span className="se-group-title">{title}</span>
-        {aside}
+        <button
+          type="button"
+          className="se-group-head-toggle"
+          aria-label={open ? `收起${title}` : `展开${title}`}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((current) => !current)}
+        >
+          <span className="se-group-title">{title}</span>
+        </button>
+        {aside && <span className="se-group-head-actions">{aside}</span>}
       </header>
-      <div className="se-group-body">{children}</div>
+      <AnimatedCollapse open={open}>
+        <div id={bodyId} className="se-group-body">{children}</div>
+      </AnimatedCollapse>
+      <ContextMenu
+        open={menu !== null}
+        x={menu?.x ?? 0}
+        y={menu?.y ?? 0}
+        items={[{ label: open ? '收起面板' : '展开面板', onSelect: () => setOpen((current) => !current) }]}
+        onClose={() => setMenu(null)}
+      />
     </section>
   );
 }
@@ -1229,6 +1362,7 @@ export function FileList({
   disabled?: boolean;
 }) {
   const [drag, setDrag] = useState(false);
+  const [contextItem, setContextItem] = useState<{ item: FileListItem; x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   // Tauri 下 wry 在 OS 层拦截文件拖放，HTML5 drop 事件收不到；改用 webview 拖放事件驱动。
@@ -1340,6 +1474,11 @@ export function FileList({
               }}
               onMouseEnter={(event) => updateFileNameMarquee(event.currentTarget, true)}
               onMouseLeave={(event) => updateFileNameMarquee(event.currentTarget, false)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setContextItem({ item, x: event.clientX, y: event.clientY });
+              }}
             >
               <label
                 className={`se-check se-check-sm${item.checked ? ' is-checked' : ''}${item.indeterminate ? ' is-indeterminate' : ''}`}
@@ -1382,6 +1521,35 @@ export function FileList({
           );
         })}
       </ul>
+      <ContextMenu
+        open={contextItem !== null}
+        x={contextItem?.x ?? 0}
+        y={contextItem?.y ?? 0}
+        onClose={() => setContextItem(null)}
+        items={contextItem ? [
+          ...(contextItem.item.isDirectory ? [{
+            label: contextItem.item.expanded ? '收起目录' : '展开目录',
+            disabled,
+            onSelect: () => onToggleExpanded(contextItem.item.path),
+          }] : [
+            { label: '设为当前素材', disabled: disabled || !onActivate, onSelect: () => onActivate?.(contextItem.item.path) },
+            { label: '打开素材', disabled: disabled || !onOpen, onSelect: () => onOpen?.(contextItem.item.path) },
+          ]),
+          {
+            label: contextItem.item.checked ? '取消勾选' : '勾选',
+            disabled: disabled || (!contextItem.item.isDirectory && !!acceptsFile && !acceptsFile(contextItem.item.path)),
+            separatorBefore: true,
+            onSelect: () => onToggleSelect(contextItem.item.path),
+          },
+          ...(onRemove && contextItem.item.removable ? [{
+            label: '从列表移除',
+            danger: true,
+            separatorBefore: true,
+            disabled,
+            onSelect: () => onRemove(contextItem.item.path),
+          }] : []),
+        ] : []}
+      />
     </div>
   );
 }
@@ -1418,8 +1586,15 @@ export function SharedFilePanel({
   acceptsFile?: (path: string) => boolean;
   disabled?: boolean;
 }) {
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   return (
-    <div className="se-shared-files">
+    <div
+      className="se-shared-files"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       <div className="se-panel-head">
         <span className="se-panel-title">素材列表</span>
         <span className="se-count-chip">{totalCount}</span>
@@ -1441,6 +1616,17 @@ export function SharedFilePanel({
         <Button disabled={disabled || items.length === 0} onClick={onSelectAll} icon={<IconSelectAll size={15} />} title="全选">全选</Button>
         <Button disabled={disabled || items.length === 0} onClick={onClear} icon={<IconTrash size={15} />} title="清除列表" className="se-btn-danger">清除列表</Button>
       </div>
+      <ContextMenu
+        open={menu !== null}
+        x={menu?.x ?? 0}
+        y={menu?.y ?? 0}
+        onClose={() => setMenu(null)}
+        items={[
+          { label: '添加素材', disabled, onSelect: onPick },
+          { label: '全选素材', disabled: disabled || items.length === 0, onSelect: onSelectAll },
+          { label: '清除列表', danger: true, separatorBefore: true, disabled: disabled || items.length === 0, onSelect: onClear },
+        ]}
+      />
     </div>
   );
 }

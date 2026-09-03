@@ -29,6 +29,7 @@ import {
 import { waitForAgentTaskHandler } from "./lib/agentTaskBridge";
 import appIcon from "./assets/icon.svg";
 import { useModalLayerRegistration } from "./lib/modalLayer";
+import { VideoPlayerVisibilityProvider } from "./components/VideoPlayer";
 
 type TabDef = {
   key: string;
@@ -88,7 +89,7 @@ const AGENT_TASK_LABEL: Record<AgentTaskSnapshot['function'], string> = {
 };
 
 // Tauri 运行时会用 getVersion() 读取真实版本号；此处仅作浏览器直开 Vite 时的回退值
-const FALLBACK_APP_VERSION = "2.2.5";
+const FALLBACK_APP_VERSION = "2.2.6";
 const PROJECT_GITHUB_URL = "https://github.com/AngleNaris/shadowencoder";
 
 const THEME_ACCENT_OPTIONS = [
@@ -390,6 +391,7 @@ function SharedFilesColumn({ disabled = false, acceptsFile }: {
 function AppShell() {
   const [tab, setTab] = useState(0);
   const renderedTab = useDeferredValue(tab);
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set([0]));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
@@ -453,6 +455,13 @@ function AppShell() {
     if (taskRef.current.running) return;
     setTab((currentTab) => currentTab === targetTab ? currentTab : targetTab);
   }, []);
+
+  useEffect(() => {
+    setVisitedTabs((current) => {
+      if (current.has(renderedTab)) return current;
+      return new Set(current).add(renderedTab);
+    });
+  }, [renderedTab]);
 
   const refreshAgentTaskState = useCallback(async () => {
     try {
@@ -672,7 +681,6 @@ function AppShell() {
     if (progressTimerRef.current) globalThis.clearTimeout(progressTimerRef.current);
   }, []);
 
-  const Current = TABS[renderedTab].Comp;
   return (
     <div className="se-app-frame">
       <div className={`se-app${task.running ? ' is-task-running' : ''}`} aria-busy={task.running}>
@@ -732,19 +740,22 @@ function AppShell() {
           </div>
           <ResizeHandle onDelta={resizeFiles} />
           <div className="se-col-tool">
-            <Current />
+            {TABS.map((item, index) => {
+              if (!visitedTabs.has(index) && index !== renderedTab) return null;
+              const TabComponent = item.Comp;
+              const active = index === renderedTab;
+              return (
+                <div className="se-tab-surface" hidden={!active} key={item.key}>
+                  <VideoPlayerVisibilityProvider active={active}>
+                    <TabComponent />
+                  </VideoPlayerVisibilityProvider>
+                </div>
+              );
+            })}
           </div>
         </div>
 
         <div className="se-statusbar">
-          <span className="se-status-live">
-            <span className="se-status-dot" aria-hidden />
-            <span className="se-status-live-copy" title={agentTaskState?.detail || (task.running ? task.detail : '就绪')}>
-              {agentTaskState
-                ? `Agent · ${AGENT_TASK_LABEL[agentTaskState.function]} · ${agentTaskState.detail}`
-                : task.running ? task.detail : '就绪'}
-            </span>
-          </span>
           <span className="grow">
             素材 {fl.totalCount} · 已勾选 {fl.selectedCount}
           </span>

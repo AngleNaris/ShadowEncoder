@@ -174,42 +174,49 @@ fn parse_args(args: &[String]) -> Result<ParsedCommand, String> {
             },
             Some(required_revision(rest)?),
         )),
-        ["workflow", "step-add", workflow_id, kind, rest @ ..] => {
+        ["workflow", "node-add", workflow_id, kind, rest @ ..] => {
             let revision = required_i64_flag(rest, "--revision")?;
-            let parent_id = optional_flag(rest, "--parent")?.map(str::to_string);
-            let branch = optional_flag(rest, "--branch")?.map(str::to_string);
-            ensure_only_flags(rest, &["--revision", "--parent", "--branch"])?;
+            ensure_only_flags(rest, &["--revision"])?;
             Ok(request(
-                AgentCommand::WorkflowStepAdd {
+                AgentCommand::WorkflowNodeAdd {
                     workflow_id: (*workflow_id).to_string(),
                     kind: (*kind).to_string(),
-                    parent_id,
-                    branch,
                 },
                 Some(revision),
             ))
         }
-        ["workflow", "step-set", workflow_id, step_id, field, value, rest @ ..] => Ok(request(
-            AgentCommand::WorkflowStepSet {
+        ["workflow", "node-set", workflow_id, node_id, field, value, rest @ ..] => Ok(request(
+            AgentCommand::WorkflowNodeSet {
                 workflow_id: (*workflow_id).to_string(),
-                step_id: (*step_id).to_string(),
+                node_id: (*node_id).to_string(),
                 field: (*field).to_string(),
                 value: parse_scalar(value)?,
             },
             Some(required_revision(rest)?),
         )),
-        ["workflow", "step-remove", workflow_id, step_id, rest @ ..] => Ok(request(
-            AgentCommand::WorkflowStepRemove {
+        ["workflow", "node-remove", workflow_id, node_id, rest @ ..] => Ok(request(
+            AgentCommand::WorkflowNodeRemove {
                 workflow_id: (*workflow_id).to_string(),
-                step_id: (*step_id).to_string(),
+                node_id: (*node_id).to_string(),
             },
             Some(required_revision(rest)?),
         )),
-        ["workflow", "step-move", workflow_id, step_id, after_step_id, rest @ ..] => Ok(request(
-            AgentCommand::WorkflowStepMove {
+        ["workflow", "edge-add", workflow_id, source, source_port, target, target_port, rest @ ..] => {
+            Ok(request(
+                AgentCommand::WorkflowEdgeAdd {
+                    workflow_id: (*workflow_id).to_string(),
+                    source: (*source).to_string(),
+                    source_port: (*source_port).to_string(),
+                    target: (*target).to_string(),
+                    target_port: (*target_port).to_string(),
+                },
+                Some(required_revision(rest)?),
+            ))
+        }
+        ["workflow", "edge-remove", workflow_id, edge_id, rest @ ..] => Ok(request(
+            AgentCommand::WorkflowEdgeRemove {
                 workflow_id: (*workflow_id).to_string(),
-                step_id: (*step_id).to_string(),
-                after_step_id: (*after_step_id).to_string(),
+                edge_id: (*edge_id).to_string(),
             },
             Some(required_revision(rest)?),
         )),
@@ -497,7 +504,7 @@ fn command_help(command: &str) -> &'static str {
         "preset set" => "preset set <preset-id> <field> <value> --revision <n>\n修改一个标量字段。数组和对象会被拒绝；布尔值使用不带引号的小写 true 或 false。\n",
         "preset item-add" => "preset item-add <preset-id> <field> <value> --revision <n>\n向允许的列表字段添加一项。\n",
         "preset item-remove" => "preset item-remove <preset-id> <field> <item-id> --revision <n>\n按 preset show 返回的 itemId 移除一项。\n",
-        "workflow step-add" => "workflow step-add <workflow-id> <kind> --revision <n> [--parent <condition-id> --branch then|else]\n添加一个动作或条件步骤。\n",
+        "workflow node-add" => "workflow node-add <workflow-id> <kind> --revision <n>\n添加节点。kind 支持 backup、transcode、mix、check、filter、long_edge、frame_rate、list_index、reverse_index、count、math、compare、boolean、gate、output。\n",
         "task start" => "task start <function> --preset <preset-id> --scope selected --revision <n>\n请求 GUI 执行一个非破坏任务。\n",
         "undo" => "undo\n撤回当前 Agent session 最近一个仍可安全撤回的操作。\n",
         _ => "未提供该命令的独立帮助。运行 shadowencoder-cli help 查看完整 Skill。\n",
@@ -636,48 +643,54 @@ mod tests {
             &["source", "unselect", "source-1", "--revision", "1"],
             &[
                 "workflow",
-                "step-add",
+                "node-add",
                 "workflow-1",
-                "backup",
+                "transcode",
                 "--revision",
                 "1",
             ],
             &[
                 "workflow",
-                "step-add",
+                "node-add",
                 "workflow-1",
-                "check",
-                "--revision",
-                "1",
-                "--parent",
-                "condition-1",
-                "--branch",
-                "then",
-            ],
-            &[
-                "workflow",
-                "step-set",
-                "workflow-1",
-                "step-1",
-                "failureMode",
-                "continue",
+                "compare",
                 "--revision",
                 "1",
             ],
             &[
                 "workflow",
-                "step-remove",
+                "node-set",
                 "workflow-1",
-                "step-1",
+                "node-1",
+                "presetId",
+                "preset-1",
                 "--revision",
                 "1",
             ],
             &[
                 "workflow",
-                "step-move",
+                "node-remove",
                 "workflow-1",
-                "step-2",
-                "step-1",
+                "node-1",
+                "--revision",
+                "1",
+            ],
+            &[
+                "workflow",
+                "edge-add",
+                "workflow-1",
+                "__workflow_start__",
+                "media",
+                "node-1",
+                "media",
+                "--revision",
+                "1",
+            ],
+            &[
+                "workflow",
+                "edge-remove",
+                "workflow-1",
+                "edge-1",
                 "--revision",
                 "1",
             ],

@@ -479,12 +479,30 @@ export function exportImageSequence(input: string, start: number, duration: numb
   const c = crop && crop.w > 0 && crop.h > 0 ? [crop.x, crop.y, crop.w, crop.h] : null;
   return invoke<string>('export_image_sequence', { input, start, duration, fps, width, height, imageFormat, quality, pngCompression, crop: c, outputOptions });
 }
+export function writeWorkflowLog(directory: string, name: string, content: string): Promise<string> {
+  return invoke<string>('write_workflow_log', { directory, name, content });
+}
 export function exportSegment(input: string, start: number, duration: number, fps: number, width: number, height: number, outFormat: string, crop: CropRect | null, outputOptions: OutputSettings, videoCodec = '', videoProfile = '', crf = 0, videoBitrate = 0, pixelFormat = '', audioCodec = '', audioBitrate = 0) {
   const c = crop && crop.w > 0 && crop.h > 0 ? [crop.x, crop.y, crop.w, crop.h] : null;
   return invoke<string>('export_segment', { input, start, duration, fps, width, height, outFormat, crop: c, videoCodec, videoProfile, pixelFormat, crf, videoBitrate, audioCodec, audioBitrate, outputOptions });
 }
 
 // ── 原 ShadowEncoder 命令 ─────────────────────────────────────
+export type TranscodeItemResult = {
+  sourcePath: string;
+  status: 'completed' | 'failed' | 'canceled';
+  outputPath: string | null;
+  error: string | null;
+};
+
+export type TranscodeBatchResult = {
+  items: TranscodeItemResult[];
+  outputPaths: string[];
+  completed: number;
+  failed: number;
+  canceled: boolean;
+};
+
 export function transcode(opts: {
   paths: string[];
   videoCodec: string;
@@ -513,7 +531,7 @@ export function transcode(opts: {
   denoise: number;
   deblock: number;
   loudnorm: boolean;
-  audioOnly: boolean;
+  outputKind: 'video' | 'audio';
   noAudio: boolean;
   keepRes: boolean;
   rateMode: string;
@@ -521,7 +539,8 @@ export function transcode(opts: {
   twoPass: boolean;
   outputOptions: OutputSettings;
 }) {
-  return invoke<string[]>('transcode', opts as any);
+  const { outputKind, ...request } = opts;
+  return invoke<TranscodeBatchResult>('transcode', { ...request, audioOnly: outputKind === 'audio' } as any);
 }
 export function mixAudio(paths: string[], loudnormI: number, loudnormTp: number, loudnormLra: number, compandThreshold: number, compandGain: number, loudnormOn: boolean, compandOn: boolean, outputOptions: OutputSettings) {
   return invoke<string[]>('mix', { paths, loudnormI, loudnormTp, loudnormLra, compandThreshold, compandGain, loudnormOn, compandOn, outputOptions });

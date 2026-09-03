@@ -115,14 +115,64 @@ test('更新检查读取 GitHub Release 且仓库链接调用受限系统浏览�
   assert.match(rustSource, /fn is_allowed_project_url/);
 });
 
-test('流程最后一步删除时空态同步过渡且节点保留右间距', async () => {
-  const [uiSource, theme] = await Promise.all([
-    readFile(new URL('../src/components/ui.tsx', import.meta.url), 'utf8'),
+test('流程画布保留可移动输入节点、收缩参数和易命中的方形连接点', async () => {
+  const [theme, editor, dit] = await Promise.all([
     readFile(new URL('../src/styles/theme.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/WorkflowEditor.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/DitTabs.tsx', import.meta.url), 'utf8'),
   ]);
 
-  assert.match(uiSource, /const showEmpty = items\.length === 0 && empty != null/);
-  assert.match(uiSource, /se-animated-list-empty\$\{entries\.length > 0 \? ' is-entering' : ''\}/);
-  assert.match(theme, /\.se-workflow-node\s*\{[^}]*padding:\s*8px 8px 8px 9px;/);
-  assert.match(theme, /@keyframes se-list-empty-enter[\s\S]*grid-template-rows:\s*0fr[\s\S]*grid-template-rows:\s*1fr/);
+  assert.match(theme, /\.se-workflow-graph-viewport\s*\{[^}]*height:\s*clamp\(420px, 58vh, 640px\);[^}]*overflow:\s*hidden;/);
+  assert.match(theme, /\.se-workflow-flow-node\s*\{[^}]*width:\s*268px;[^}]*background:\s*var\(--surface-2\);[^}]*cursor:\s*grab;/);
+  assert.match(theme, /\.se-workflow-handle\.react-flow__handle\s*\{[^}]*width:\s*9px;[^}]*min-width:\s*9px;[^}]*height:\s*9px;[^}]*min-height:\s*9px;[^}]*border-radius:\s*0;[^}]*transform:\s*translateY\(-50%\);/);
+  assert.match(theme, /\.se-workflow-handle\.react-flow__handle::before\s*\{[^}]*width:\s*24px;[^}]*height:\s*24px;/);
+  assert.match(theme, /\.se-workflow-handle\.react-flow__handle-left\s*\{[^}]*left:\s*0;[^}]*translate\(-50%, -50%\)/);
+  assert.match(editor, /interactionWidth:\s*28/);
+  assert.match(editor, /<Handle[\s\S]*className=\{`se-workflow-handle is-\$\{port\.type\}\$\{connectionState\}`\}/);
+  assert.match(editor, /sourceHandle:\s*`out:\$\{edge\.sourcePort\}`[\s\S]*targetHandle:\s*`in:\$\{edge\.targetPort\}`/);
+  assert.match(editor, /deletable:\s*false, draggable:\s*!disabled/);
+  assert.match(editor, /useNodesState<FlowNode>\(graphNodes\)/);
+  assert.match(editor, /const selectedIds = new Set\(current\.filter\(\(node\) => node\.selected\)\.map\(\(node\) => node\.id\)\)/);
+  assert.match(editor, /graphNodes\.map\(\(node\) => \(\{ \.\.\.node, selected: selectedIds\.has\(node\.id\) \}\)\)/);
+  assert.match(editor, /onNodesChange=\{onNodesChange\}/);
+  assert.match(editor, /onNodeDragStop=\{\(_, _node, draggedNodes\) =>[\s\S]*new Map\(draggedNodes\.map\(\(node\) => \[node\.id, node\.position\]\)\)[\s\S]*startPosition: positions\.get\(WORKFLOW_GRAPH_START_ID\) \?\? graph\.startPosition[\s\S]*const position = positions\.get\(item\.id\)/);
+  assert.doesNotMatch(editor, /onNodeDragStop=\{\(_, node\) =>/);
+  assert.match(editor, /<ui\.AnimatedCollapse open=\{data\.expanded\}/);
+  assert.equal((editor.match(/className="se-workflow-node-editor nodrag nopan"/g) ?? []).length, 5);
+  assert.match(editor, /onNodeDoubleClick=\{\(_, node\) =>/);
+  assert.match(editor, /setExpandedId\(\(current\) => current === node\.id \? '' : node\.id\)/);
+  assert.match(editor, /<ControlButton aria-label="画布操作说明"/);
+  assert.match(editor, /<ControlButton aria-label="撤销"[\s\S]*<ControlButton aria-label="重做"/);
+  assert.match(editor, /const \[pastGraphs, setPastGraphs\] = useState<WorkflowGraph\[\]>\(\[\]\)/);
+  assert.match(editor, /const \[futureGraphs, setFutureGraphs\] = useState<WorkflowGraph\[\]>\(\[\]\)/);
+  assert.match(editor, /const commitGraph = useCallback[\s\S]*setPastGraphs[\s\S]*setFutureGraphs\(\[\]\)/);
+  assert.match(editor, /event\.key\.toLowerCase\(\)[\s\S]*key === 'z'[\s\S]*key === 'y'/);
+  assert.match(editor, /<dialog ref=\{helpDialogRef\}/);
+  assert.doesNotMatch(editor, /const \[selectedId, setSelectedId\]|selected:\s*selectedId\b/);
+  assert.match(editor, /panOnScroll=\{false\}[\s\S]*panOnDrag=\{\[1\]\}[\s\S]*panActivationKeyCode="Alt"[\s\S]*selectionOnDrag/);
+  assert.doesNotMatch(editor, /panOnDrag=\{\[[^\]]*2/);
+  assert.match(editor, /onConnectStart=\{startConnection\}[\s\S]*onConnectEnd=\{\(\) => setActiveConnection\(null\)\}[\s\S]*isValidConnection=\{isValidConnection\}/);
+  assert.match(editor, /connectWorkflowGraph\(graph, connection\.source, sourcePort, connection\.target, targetPort\) !== graph/);
+  assert.match(editor, /is-connectable-target[\s\S]*is-incompatible-target/);
+  assert.match(editor, /groupLabel: index === 0 \? '执行'[\s\S]*groupLabel: '检测'[\s\S]*groupLabel: '逻辑'/);
+  assert.match(editor, /issue && <div className="se-workflow-validation" role="status">\{issue\}<\/div>/);
+  assert.match(dit, /setWorkflowEditorKey\(\(current\) => current \+ 1\)/);
+  assert.match(dit, /<WorkflowEditor key=\{workflowEditorKey\} value=\{workflow\} onChange=\{setWorkflow\} disabled=\{task\.running\} issue=\{workflowCanvasIssue\} \/>/);
+  assert.doesNotMatch(dit, /<div className="se-workflow-validation">/);
+  assert.match(theme, /\.se-workflow-validation\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*12px;[^}]*left:\s*12px;/);
+  assert.match(editor, /fitView\(\{ nodes: \[\{ id: focusNodeId \}\], duration: reduced \? 0 : 320/);
+  assert.match(editor, /screenToFlowPosition/);
+  assert.equal((editor.match(/event\.stopPropagation\(\)/g) ?? []).length >= 3, true);
+  assert.match(editor, /className="se-workflow-graph-viewport" onContextMenu=\{\(event\) => event\.stopPropagation\(\)\}/);
+  assert.match(editor, /<ui\.ContextMenu/);
+  assert.doesNotMatch(editor, /se-workflow-graph-toolbar/);
+  assert.match(editor, /function WorkflowNodeEditor/);
+  assert.match(theme, /\.se-workflow-flow-node\.selected\s*\{[^}]*background:\s*var\(--surface-3\);/);
+  assert.match(theme, /\.se-collapse\s*\{[^}]*transition:[^}]*height 160ms/);
+  assert.match(theme, /\.se-workflow-help-dialog\s*\{[^}]*border-radius:\s*0;/);
+  const nodeEditor = editor.slice(editor.indexOf('function WorkflowNodeEditor'), editor.indexOf('export function WorkflowEditor'));
+  assert.doesNotMatch(nodeEditor, /<span>动作<\/span>/);
+  assert.match(nodeEditor, /ACTION_PRESET_LABELS\[node\.kind\]/);
+  assert.doesNotMatch(editor, /se-workflow-graph-node-id|node\.id\.slice\(-6\)|ACTION_EXPANDED_HEIGHT|height:\s*nodeHeight/);
+  assert.doesNotMatch(theme, /\.se-workflow-node-list/);
 });

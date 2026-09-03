@@ -24,13 +24,13 @@ test('DIT 备份与流程都从共享素材列表传递混合 sourcePaths', asyn
   assert.match(tabs, /fl\.hasSelection \? fl\.selectedSourcePaths : fl\.paths/);
   assert.match(tabs, /buildBackupRequest\(form, inputPaths\)/);
   assert.match(tabs, /let sourcePaths = \[\.\.\.inputPaths\]/);
-  assert.match(tabs, /buildBackupRequest\(form, state\.paths, new Date\(\)\)/);
+  assert.match(tabs, /buildBackupRequest\(form, assets\.map\(\(asset\) => asset\.path\), new Date\(\)\)/);
   assert.match(bridge, /sourcePaths: string\[\]/);
   assert.match(backend, /source_paths: Vec<String>/);
   assert.match(backend, /metadata\.is_dir\(\)[\s\S]*metadata\.is_file\(\)/);
 });
 
-test('DIT 目标与预设列表共用稳定标识的列表动画', async () => {
+test('DIT 目标与预设列表保留稳定标识，流程画布按全部拖动节点 ID 更新', async () => {
   const tabs = await readFile(new URL('../src/components/DitTabs.tsx', import.meta.url), 'utf8');
   const presets = await readFile(new URL('../src/components/presetSystem.tsx', import.meta.url), 'utf8');
   const workflow = await readFile(new URL('../src/components/WorkflowEditor.tsx', import.meta.url), 'utf8');
@@ -39,7 +39,10 @@ test('DIT 目标与预设列表共用稳定标识的列表动画', async () => {
 
   assert.match(tabs, /type BackupDestination = \{ id: string; path: string \}/);
   assert.match(tabs, /<ui\.AnimatedList[\s\S]*getKey=\{\(destination\) => destination\.id\}/);
-  assert.match(workflow, /<ui\.AnimatedList[\s\S]*items=\{nodes\}[\s\S]*getKey=\{\(node\) => node\.id\}/);
+  assert.match(workflow, /id: node\.id, type: 'workflow', position: node\.position/);
+  assert.match(workflow, /const positions = new Map\(draggedNodes\.map\(\(node\) => \[node\.id, node\.position\]\)\)[\s\S]*nodes: graph\.nodes\.map\(\(item\) =>/);
+  assert.match(workflow, /const deleteNode = useCallback\(\(id: string\) => \{[\s\S]*setExpandedId[\s\S]*removeWorkflowGraphNode\(graph, id\)/);
+  assert.doesNotMatch(workflow, /<ui\.AnimatedList[\s\S]*items=\{nodes\}/);
   assert.match(presets, /<ui\.AnimatedList[\s\S]*getKey=\{\(preset\) => preset\.id\}/);
   assert.match(ui, /export function AnimatedList<T>/);
   assert.match(ui, /node\.offsetTop/);

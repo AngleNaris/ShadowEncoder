@@ -30,7 +30,7 @@ test('六类 Agent 任务都复用 GUI 执行链并应用非破坏约束', async
   }
   assert.match(tabs, /uniqueName:\s*true/);
   assert.match(ditTabs, /operation:\s*'copy',\s*reuseIdentical:\s*false/);
-  assert.match(ditTabs, /uniqueName:\s*environment\.agentMode/);
+  assert.match(ditTabs, /uniqueName:\s*true/);
   assert.match(app, /waitForAgentTaskHandler\(current\.function\)/);
   assert.match(app, /status:\s*'completed'/);
   assert.match(app, /status:\s*'failed'/);

@@ -1,7 +1,7 @@
 {
   "name": "shadowencoder",
   "private": true,
-  "version": "2.2.5",
+  "version": "2.2.6",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -9,7 +9,8 @@
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "build": "tsc && vite build",
     "build:cli": "node scripts/stage-agent-cli.mjs",
-    "package:windows": "npm run build:cli && tauri build --features custom-protocol --config src-tauri/tauri.windows.conf.json",
+    "verify:ffmpeg": "node scripts/verify-ffmpeg.mjs",
+    "package:windows": "npm run verify:ffmpeg && npm run build:cli && tauri build --features custom-protocol --config src-tauri/tauri.windows.conf.json",
     "package:portable": "npm run package:windows && node scripts/package-portable.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
@@ -19,6 +20,7 @@
     "@emotion/styled": "^11.14.1",
     "@mui/material": "^9.2.0",
     "@tauri-apps/api": "^2.0.0",
+    "@xyflow/react": "^12.11.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
