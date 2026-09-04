@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="./docs/hero.svg" width="880" alt="ShadowEncoder">
+  <img src="./docs/icon.svg" width="168" alt="ShadowEncoder">
 </p>
+
+<h1 align="center">ShadowEncoder</h1>
 
 <p align="center">把素材丢进来，拿到想要的结果就走。一个窗口，一整套媒体处理流程。</p>
 
@@ -14,13 +16,15 @@
 <p align="center">
   <a href="https://github.com/AngleNaris/ShadowEncoder/releases/tag/v2.2.6"><strong>下载 v2.2.6</strong></a>
   &nbsp;·&nbsp;
+  <a href="#这是什么">产品能力</a>
+  &nbsp;·&nbsp;
   <a href="./docs/agent-cli-design.md">Agent CLI</a>
   &nbsp;·&nbsp;
   <a href="./CONTRIBUTING.md">参与贡献</a>
 </p>
 
 <p align="center">
-  <img src="./docs/screenshot.png" width="900" alt="ShadowEncoder 主界面">
+  <img src="./docs/screenshot.jpg" width="900" alt="ShadowEncoder 主界面">
 </p>
 
 ---
