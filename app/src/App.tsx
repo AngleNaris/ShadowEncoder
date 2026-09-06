@@ -89,7 +89,7 @@ const AGENT_TASK_LABEL: Record<AgentTaskSnapshot['function'], string> = {
 };
 
 // Tauri 运行时会用 getVersion() 读取真实版本号；此处仅作浏览器直开 Vite 时的回退值
-const FALLBACK_APP_VERSION = "2.2.6";
+const FALLBACK_APP_VERSION = "2.2.7";
 const PROJECT_GITHUB_URL = "https://github.com/AngleNaris/shadowencoder";
 
 const THEME_ACCENT_OPTIONS = [

@@ -15,6 +15,7 @@ import { isTauriRuntime, probePath } from '../lib/ffmpeg';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { FileListItem } from '../lib/fileListContext';
 import { isMediaPath } from '../lib/mediaExtensions';
+import { startMaterialDrag } from '../lib/materialDrag';
 
 /* ── 面板（左固定 / 右自适应） ─────────────────────────────── */
 export function LeftPanel({ alpha, children }: { alpha?: boolean; children: ReactNode }) {
@@ -1364,6 +1365,8 @@ export function FileList({
   const [drag, setDrag] = useState(false);
   const [contextItem, setContextItem] = useState<{ item: FileListItem; x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const cancelMaterialDrag = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => cancelMaterialDrag.current?.(), [disabled]);
 
   // Tauri 下 wry 在 OS 层拦截文件拖放，HTML5 drop 事件收不到；改用 webview 拖放事件驱动。
   useEffect(() => {
@@ -1449,6 +1452,14 @@ export function FileList({
             <li
               key={item.path}
               role="treeitem"
+              draggable={false}
+              onDragStart={(event) => event.preventDefault()}
+              onPointerDown={(event) => {
+                if (disabled || item.isDirectory || event.button !== 0 || !event.isPrimary
+                  || (event.target as HTMLElement).closest('button, input, label')) return;
+                cancelMaterialDrag.current?.();
+                cancelMaterialDrag.current = startMaterialDrag(event.nativeEvent, item.path);
+              }}
               aria-level={item.depth + 1}
               aria-expanded={item.isDirectory ? item.expanded : undefined}
               aria-disabled={unsupported || undefined}

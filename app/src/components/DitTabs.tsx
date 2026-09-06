@@ -13,6 +13,7 @@ import {
   getVideoInfo,
   mixAudio,
   pickPath,
+  probePath,
   runDitBackup,
   transcode,
   writeWorkflowLog,
@@ -36,6 +37,8 @@ import {
   type PresetBuilderCtx,
 } from './presetSystem';
 import { WorkflowEditor, WorkflowPresetBuilder } from './WorkflowEditor';
+import { runWorkflowScript } from '../lib/workflowScript';
+import { applyOutputOverride } from '../lib/workflowOutput';
 import {
   WORKFLOW_ACTION_LABELS,
   normalizeWorkflowDefinition,
@@ -44,6 +47,7 @@ import {
 } from '../lib/workflow';
 import {
   executeWorkflowGraphDAG,
+  WORKFLOW_GRAPH_START_ID,
   workflowDefinitionNodeCounts,
   workflowGraphIssues,
   type WorkflowGraph,
@@ -760,10 +764,12 @@ function findPreset(
   return preset;
 }
 
-async function transcodePreset(paths: string[], preset: Preset, uniqueName = false): Promise<TranscodeBatchResult> {
+async function transcodePreset(paths: string[], preset: Preset, uniqueName = false, asset?: WorkflowAsset): Promise<TranscodeBatchResult> {
   const form: any = { ...DEFAULT_ENCODE_FORM, ...normalizeEncodeParams(preset.params) };
   return transcode({
-    paths,
+    paths: asset?.preprocessing?.paths ?? paths,
+    preprocessing: asset?.preprocessing?.plan,
+    outputOverride: asset?.outputOverride,
     videoCodec: form.videoCodec,
     videoProfile: form.videoProfile,
     crf: form.crf,
@@ -862,14 +868,11 @@ function assetMap(assets: WorkflowAsset[]) {
 }
 
 async function resolveWorkflowAssets(assets: WorkflowAsset[], environment: WorkflowExecutionEnvironment): Promise<WorkflowAsset[]> {
-  const paths = await environment.resolveMediaPaths(assets.map((asset) => asset.path));
-  const existing = assetMap(assets);
-  return paths.map((path, index) => existing.get(path) ?? {
-    id: `${assets[0]?.id ?? 'asset'}:${index}:${path}`,
-    path,
-    sourcePath: path,
-    index,
-  });
+  return (await Promise.all(assets.map(async asset => {
+    if (asset.preprocessing) return [asset];
+    const paths = await environment.resolveMediaPaths([asset.path]);
+    return paths.map((path, index) => path === asset.path ? asset : { ...asset, id: `${asset.id}:${index}:${path}`, path, sourcePath: path, index });
+  }))).flat();
 }
 
 function workflowSignals(assets: WorkflowAsset[], passed: Set<string>): WorkflowBoolValue {
@@ -887,6 +890,7 @@ async function runWorkflowAction(
   const preset = findPreset(presets[node.kind], node.presetId, label);
   if ((preset.revision ?? 1) !== node.presetRevision) throw new Error(`${label}预设“${preset.name}”已更新，请先同步流程中的预设版本`);
   const assets = await resolveWorkflowAssets(sourceAssets, environment);
+  if (node.kind !== 'transcode' && assets.some(asset => asset.preprocessing)) throw new Error('自定义预处理尚未编码，请先连接视频编码节点');
   environment.startedActions += 1;
   const actionIndex = environment.startedActions;
   task.setDetail(`流程 ${actionIndex}/${environment.totalActions} · ${label}`);
@@ -922,25 +926,27 @@ async function runWorkflowAction(
       state.fail += summary.failedFiles;
       report.push(`备份完成 ${summary.completedFiles}，失败 ${summary.failedFiles}`);
     } else if (node.kind === 'transcode') {
-      const result = await transcodePreset(assets.map((asset) => asset.path), preset, true);
-      const byPath = assetMap(assets);
-      for (const item of result.items) {
-        const asset = byPath.get(item.sourcePath);
-        if (!asset) continue;
-        if (item.status === 'completed' && item.outputPath) {
-          passed.add(asset.id);
-          successful.push({ ...asset, path: item.outputPath });
-        } else if (item.status === 'failed') {
-          failed.push(asset);
-          errors.set(asset.id, item.error || '转码失败');
+      for (const asset of assets) {
+        if (task.isCancelled()) break;
+        const result = await transcodePreset([asset.path], preset, true, asset);
+        for (const item of result.items) {
+          if (item.status === 'completed' && item.outputPath) {
+            passed.add(asset.id);
+            successful.push({ ...asset, path: item.outputPath, preprocessing: undefined });
+          } else if (item.status === 'failed') {
+            failed.push(asset);
+            errors.set(asset.id, item.error || '转码失败');
+          }
         }
+        state.pass += result.completed;
+        state.fail += result.failed;
       }
-      state.pass += result.completed;
-      state.fail += result.failed;
-      report.push(`转码完成 ${result.completed}，失败 ${result.failed}`);
+      report.push(`转码完成 ${successful.length}，失败 ${failed.length}`);
     } else if (node.kind === 'mix') {
       const params: any = { ...DEFAULT_OUTPUT_FORM, ...preset.params };
-      const outputs = await mixAudio(assets.map((asset) => asset.path), params.lnI ?? -24, params.lnTp ?? -2, params.lnLra ?? 7, params.cpTh ?? -27, params.cpGain ?? 5, params.lnOn !== false, params.tpOn !== false, { ...toOutputSettings(params, preset.name), uniqueName: true });
+      const overrides = assets.map(asset => JSON.stringify(asset.outputOverride ?? null));
+      if (new Set(overrides).size > 1) throw new Error('混音输入的输出覆盖设置不一致，请在汇合后统一设置');
+      const outputs = await mixAudio(assets.map((asset) => asset.path), params.lnI ?? -24, params.lnTp ?? -2, params.lnLra ?? 7, params.cpTh ?? -27, params.cpGain ?? 5, params.lnOn !== false, params.tpOn !== false, applyOutputOverride({ ...toOutputSettings(params, preset.name), uniqueName: true }, assets[0]?.outputOverride));
       outputs.forEach((path, index) => {
         const asset = assets[index];
         if (!asset) return;
@@ -993,6 +999,7 @@ async function runWorkflowAction(
 }
 
 async function runWorkflowProbe(node: WorkflowGraphProbeNode, sourceAssets: WorkflowAsset[], environment: WorkflowExecutionEnvironment): Promise<WorkflowNodeOutputs> {
+  if (sourceAssets.some(asset => asset.preprocessing)) throw new Error('自定义预处理尚未编码，请先编码再检测');
   const assets = await resolveWorkflowAssets(sourceAssets, environment);
   const values = new Map<string, number>();
   const errors = new Map<string, string>();
@@ -1012,6 +1019,7 @@ async function runWorkflowProbe(node: WorkflowGraphProbeNode, sourceAssets: Work
 }
 
 async function runWorkflowOutput(node: WorkflowGraphOutputNode, state: WorkflowExecutionState, environment: WorkflowExecutionEnvironment, assets: WorkflowAsset[], inputs: Record<string, WorkflowPortValue>): Promise<WorkflowNodeOutputs> {
+  if (assets.some(asset => asset.preprocessing)) throw new Error('自定义预处理缺少编码节点，无法输出文件');
   let outputAssets = assets;
   const errors = new Map<string, string>();
   const transfer = (transferAssets: WorkflowAsset[], directory: string, operation: 'copy' | 'move') => runDitBackup({
@@ -1080,12 +1088,42 @@ async function runWorkflowOutput(node: WorkflowGraphOutputNode, state: WorkflowE
 
 async function executeWorkflowGraph(graph: WorkflowGraph, state: WorkflowExecutionState, environment: WorkflowExecutionEnvironment): Promise<void> {
   const result = await executeWorkflowGraphDAG(graph, state.paths, {
+    runMaterial: async (node) => {
+      const info = await probePath(node.path);
+      if (!info.exists || info.is_directory) throw new Error(`素材文件不存在或不可用：${node.path}`);
+      return { media: { type: 'media', assets: [{ id: node.id, path: node.path, sourcePath: node.path, index: 0 }] } };
+    },
+    runScript: async (node, sourceAssets) => {
+      environment.startedActions += 1;
+      environment.task.setDetail('高级自定义');
+      workflowLog(environment.task, '执行高级自定义脚本');
+      try {
+        const assets = await resolveWorkflowAssets(sourceAssets, environment);
+        const overrides = assets.map(asset => JSON.stringify(asset.outputOverride ?? null));
+        if (new Set(overrides).size > 1) throw new Error('拼接素材的输出覆盖设置不一致，请在拼接后统一设置');
+        const preprocessing = await runWorkflowScript(node.script, assets, environment.task.isCancelled);
+        state.pass += 1;
+        return { media: { type: 'media', assets: [{ ...assets[0], id: node.id, preprocessing }] } };
+      } catch (error) {
+        state.fail += 1;
+        throw error;
+      } finally {
+        environment.completedActions += 1;
+        environment.task.setPass(state.pass);
+        environment.task.setFail(state.fail);
+      }
+    },
     runAction: (node, assets) => runWorkflowAction(node, state, environment, assets),
     runProbe: (node, assets) => runWorkflowProbe(node, assets, environment),
     runOutput: (node, assets, inputs) => runWorkflowOutput(node, state, environment, assets, inputs),
     isCancelled: environment.task.isCancelled,
   });
   for (const message of result.errors.values.values()) workflowLog(environment.task, message, 'warn');
+  if (!state.outputPaths.length && !environment.task.isCancelled()) throw new Error([...result.errors.values.values()][0] || '流程未产生输出：请检查素材筛选、分流条件和输出连线');
+}
+
+function workflowNeedsSourceList(graph: WorkflowGraph): boolean {
+  return graph.startEnabled !== false && graph.edges.some((edge) => edge.source === WORKFLOW_GRAPH_START_ID);
 }
 
 export function DitWorkflowTab() {
@@ -1112,7 +1150,7 @@ export function DitWorkflowTab() {
     [presetSets, workflow],
   );
   const invalid = validationIssues.length > 0
-    || (workflow.trigger.kind === 'manual' && inputPaths.length === 0);
+    || (workflow.trigger.kind === 'manual' && workflowNeedsSourceList(workflow.graph) && inputPaths.length === 0);
 
   const run = () => task.start(async () => {
     const definition = normalizeWorkflowDefinition(workflow);
@@ -1130,7 +1168,7 @@ export function DitWorkflowTab() {
       sourcePaths = [volume.rootPath];
       workflowLog(task, `触发磁盘：${volume.label.trim() || '未命名卷'} (${volume.rootPath})`, 'pass');
     }
-    if (sourcePaths.length === 0) throw new Error('没有可用于流程的素材');
+    if (sourcePaths.length === 0 && workflowNeedsSourceList(definition.graph)) throw new Error('没有可用于流程的素材');
 
     const counts = workflowDefinitionNodeCounts(definition);
     const state: WorkflowExecutionState = {
@@ -1184,7 +1222,7 @@ export function DitWorkflowTab() {
     }
     const issues = workflowValidationIssues(definition, agentPresetSets);
     if (issues.length > 0) throw new Error(issues[0]);
-    if (agentTask.inputPaths.length === 0) throw new Error('没有可用于流程的素材');
+    if (agentTask.inputPaths.length === 0 && workflowNeedsSourceList(definition.graph)) throw new Error('没有可用于流程的素材');
     workflowLog(task, `Agent 启动流程：${preset.name}`);
 
     const counts = workflowDefinitionNodeCounts(definition);
@@ -1224,7 +1262,7 @@ export function DitWorkflowTab() {
   const graphIssue = workflowGraphIssues(workflow.graph)[0];
   const workflowCanvasIssue = validationIssues[0] && validationIssues[0] !== graphIssue
     ? validationIssues[0]
-    : !validationIssues[0] && workflow.trigger.kind === 'manual' && inputPaths.length === 0
+    : !validationIssues[0] && workflow.trigger.kind === 'manual' && workflowNeedsSourceList(workflow.graph) && inputPaths.length === 0
       ? '素材列表中没有可执行的素材'
       : undefined;
 

@@ -123,6 +123,8 @@ pub enum AgentCommand {
 
     #[serde(rename = "workflow.node_add")]
     WorkflowNodeAdd { workflow_id: String, kind: String },
+    #[serde(rename = "workflow.validate")]
+    WorkflowValidate { workflow_id: String },
     #[serde(rename = "workflow.node_set")]
     WorkflowNodeSet {
         workflow_id: String,

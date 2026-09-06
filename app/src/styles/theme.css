@@ -1557,6 +1557,11 @@ button.se-result-view-tab:hover:not(:disabled) {
 .se-workflow-flow-node.is-filter { border-left-color: var(--warning); }
 .se-workflow-flow-node.is-output { border-left-color: var(--supporting, var(--primary-bright)); }
 .se-workflow-flow-node.is-start { width: 132px; border-left-color: var(--success); }
+.se-workflow-flow-node.is-script { width: 480px; border-left-color: var(--supporting, var(--primary-bright)); }
+.se-workflow-flow-node.is-material { border-left-color: var(--success); }
+.se-workflow-script-editor { box-sizing: border-box; width: 100%; min-height: 280px; resize: vertical; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+.se-workflow-node-issue.is-valid { color: var(--success); }
+.se-material-drag-preview { position: fixed; z-index: 10000; pointer-events: none; max-width: 260px; padding: 6px 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
 .se-workflow-node-header {
   display: flex;
   align-items: center;

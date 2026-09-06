@@ -2,6 +2,9 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import { buildEncodeNameLabels } from './outputNaming';
+import { applyOutputOverride, type WorkflowOutputOverride } from './workflowOutput';
+import type { ScriptPlan } from './workflowScript';
 
 export interface VideoInfo {
   width: number;
@@ -28,7 +31,7 @@ export interface CropRect {
 
 export type GifCompression = 'optimized' | 'compact' | 'aggressive';
 
-export type OutputMode = 'source' | 'rename' | 'subdir' | 'fixed' | 'fixedRename';
+export type OutputMode = 'source' | 'rename' | 'subdir' | 'fixed' | 'fixedRename' | 'subdirRename';
 
 export interface OutputSettings {
   mode: OutputMode;
@@ -504,6 +507,8 @@ export type TranscodeBatchResult = {
 };
 
 export function transcode(opts: {
+  preprocessing?: ScriptPlan;
+  outputOverride?: WorkflowOutputOverride;
   paths: string[];
   videoCodec: string;
   videoProfile: string;
@@ -539,8 +544,12 @@ export function transcode(opts: {
   twoPass: boolean;
   outputOptions: OutputSettings;
 }) {
-  const { outputKind, ...request } = opts;
-  return invoke<TranscodeBatchResult>('transcode', { ...request, audioOnly: outputKind === 'audio' } as any);
+  const { outputKind, outputOverride, ...request } = opts;
+  for (const field of ['crf', 'style', 'scaleEdge', 'scaleW', 'scaleH', 'fps', 'videoBitrate', 'maxrate', 'bufsize', 'audioBitrate', 'audioSampleRate', 'audioChannels', 'unsharp', 'denoise', 'deblock', 'targetFileSizeMb'] as const) {
+    request[field] = Number(request[field] ?? 0);
+    if (!Number.isFinite(request[field])) throw new Error(`编码参数 ${field} 必须是有效数字`);
+  }
+  return invoke<TranscodeBatchResult>('transcode', { ...request, outputOptions: applyOutputOverride({ ...request.outputOptions, ...buildEncodeNameLabels(opts) }, outputOverride), audioOnly: outputKind === 'audio' } as any);
 }
 export function mixAudio(paths: string[], loudnormI: number, loudnormTp: number, loudnormLra: number, compandThreshold: number, compandGain: number, loudnormOn: boolean, compandOn: boolean, outputOptions: OutputSettings) {
   return invoke<string[]>('mix', { paths, loudnormI, loudnormTp, loudnormLra, compandThreshold, compandGain, loudnormOn, compandOn, outputOptions });

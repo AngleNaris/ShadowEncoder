@@ -476,7 +476,7 @@ export function normalizeEncodeParams(params: any): any {
   const normalizedContainer = outputKind === 'audio'
     ? audioOutputContainer(container, source.audioCodec)
     : container;
-  return {
+  const normalized = {
     ...rest,
     outputKind,
     videoCodec: removedVideoCodec ? 'libx264' : source.videoCodec,
@@ -494,6 +494,7 @@ export function normalizeEncodeParams(params: any): any {
     denoise: legacyPost ? (legacyDenoise[Number(source.denoise)] ?? 0) : source.denoise,
     deblock: source.deblock ?? (legacyPost && Number(source.denoise) >= 2 ? 0.2 : 0),
   };
+  return Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== undefined));
 }
 
 // 把当前表单整理成分组（按标签页）的「标签 / 值」列表，供右侧常驻汇总面板展示
@@ -2169,6 +2170,7 @@ export function EncodeTab() {
   };
 
   const encodeLabels = buildEncodeNameLabels({
+    ...form,
     scaleW: form.scaleW,
     scaleH: form.scaleH,
     keepRes: form.keepRes,
@@ -2226,7 +2228,7 @@ export function EncodeTab() {
         rateMode: form.rateMode || 'crf',
         targetFileSizeMb: form.targetFileSizeMb || 0,
         twoPass: !!form.twoPass,
-        // 命名标签由后端按每文件实际参数探测/生成，前端标签仅用于预览
+        // Shared transcode entry supplies the same labels used by the preview.
         outputOptions: toOutputSettings(form, presetName),
       });
       t.setOutputPaths(result.outputPaths);

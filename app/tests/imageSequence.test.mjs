@@ -57,7 +57,7 @@ test('指定目录并重命名贯通输出表单、类型、后端与 Agent sche
   assert.match(outputSettings, /label: '指定目录并重命名', value: 'fixedRename'/);
   assert.match(outputSettings, /outputMode === 'rename' \|\| output\.outputMode === 'fixedRename'/);
   assert.match(outputSettings, /outputMode === 'fixed' \|\| output\.outputMode === 'fixedRename'/);
-  assert.match(rust, /mode @ \("rename" \| "fixedRename"\)[\s\S]*mode == "fixedRename"/);
+  assert.match(rust, /mode @ \("rename" \| "fixedRename" \| "subdirRename"\)[\s\S]*mode == "fixedRename"/);
   assert.match(schema, /"outputMode" => Some\(&\["source", "rename", "subdir", "fixed", "fixedRename"\]\)/);
 });
 

@@ -174,6 +174,12 @@ fn parse_args(args: &[String]) -> Result<ParsedCommand, String> {
             },
             Some(required_revision(rest)?),
         )),
+        ["workflow", "validate", workflow_id] => Ok(request(AgentCommand::WorkflowValidate { workflow_id: (*workflow_id).into() }, None)),
+        ["workflow", "script-set", workflow_id, node_id, "--file", path, rest @ ..] => {
+            let script = std::fs::read_to_string(path).map_err(|error| format!("无法读取脚本: {error}"))?;
+            if script.len() > 262144 { return Err("脚本超过 256KB".into()); }
+            Ok(request(AgentCommand::WorkflowNodeSet { workflow_id: (*workflow_id).into(), node_id: (*node_id).into(), field: "script".into(), value: Value::String(script) }, Some(required_revision(rest)?)))
+        }
         ["workflow", "node-add", workflow_id, kind, rest @ ..] => {
             let revision = required_i64_flag(rest, "--revision")?;
             ensure_only_flags(rest, &["--revision"])?;
@@ -504,7 +510,9 @@ fn command_help(command: &str) -> &'static str {
         "preset set" => "preset set <preset-id> <field> <value> --revision <n>\n修改一个标量字段。数组和对象会被拒绝；布尔值使用不带引号的小写 true 或 false。\n",
         "preset item-add" => "preset item-add <preset-id> <field> <value> --revision <n>\n向允许的列表字段添加一项。\n",
         "preset item-remove" => "preset item-remove <preset-id> <field> <item-id> --revision <n>\n按 preset show 返回的 itemId 移除一项。\n",
-        "workflow node-add" => "workflow node-add <workflow-id> <kind> --revision <n>\n添加节点。kind 支持 backup、transcode、mix、check、filter、long_edge、frame_rate、list_index、reverse_index、count、math、compare、boolean、gate、output。\n",
+        "workflow node-add" => "workflow node-add <workflow-id> <kind> --revision <n>\n添加节点。kind 支持 backup、transcode、mix、check、filter、long_edge、frame_rate、list_index、reverse_index、count、math、compare、boolean、gate、output、material、script。\n",
+        "workflow script-set" => "workflow script-set <workflow-id> <node-id> --file <utf8.js> --revision <n>\n从 UTF-8 文件更新高级自定义脚本。\n",
+        "workflow validate" => "workflow validate <workflow-id> [--json]\n检查流程结构与必要输入、输出。\n",
         "task start" => "task start <function> --preset <preset-id> --scope selected --revision <n>\n请求 GUI 执行一个非破坏任务。\n",
         "undo" => "undo\n撤回当前 Agent session 最近一个仍可安全撤回的操作。\n",
         _ => "未提供该命令的独立帮助。运行 shadowencoder-cli help 查看完整 Skill。\n",

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_ipc;
+mod workflow_script;
 #[cfg(target_os = "linux")]
 mod mpv_gpu;
 mod mpv_player;
@@ -228,6 +229,13 @@ fn resolve_output_path(
     let default_name = format!("{stem}{default_suffix}.{extension}");
     let output = match options.map(|value| value.mode.as_str()).unwrap_or("source") {
         "source" | "" => {
+            if let Some(labels) = options.filter(|value| !value.codec_label.is_empty()) {
+                return resolve_output_path(input, Some(&OutputOptions {
+                    mode: "rename".into(),
+                    name_template: "{name}_{res}_{fps}_{codec}_{bitrate}".into(),
+                    ..labels.clone()
+                }), default_suffix, extension);
+            }
             let preset = options
                 .map(|value| sanitize_filename_component(&value.preset_name))
                 .filter(|value| !value.is_empty());
@@ -237,7 +245,7 @@ fn resolve_output_path(
                     .unwrap_or(default_name),
             )
         }
-        mode @ ("rename" | "fixedRename") => {
+        mode @ ("rename" | "fixedRename" | "subdirRename") => {
             let template = options
                 .map(|value| value.name_template.trim())
                 .filter(|value| !value.is_empty())
@@ -254,31 +262,31 @@ fn resolve_output_path(
                 .replace(
                     "{res}",
                     options
-                        .map(|value| value.resolution.as_str())
+                        .map(|value| value.resolution.as_str()).filter(|value| !value.is_empty())
                         .unwrap_or("orig"),
                 )
                 .replace(
                     "{resolution}",
                     options
-                        .map(|value| value.resolution.as_str())
+                        .map(|value| value.resolution.as_str()).filter(|value| !value.is_empty())
                         .unwrap_or("orig"),
                 )
                 .replace(
                     "{fps}",
                     options
-                        .map(|value| value.fps_label.as_str())
+                        .map(|value| value.fps_label.as_str()).filter(|value| !value.is_empty())
                         .unwrap_or("orig"),
                 )
                 .replace(
                     "{codec}",
                     options
-                        .map(|value| value.codec_label.as_str())
+                        .map(|value| value.codec_label.as_str()).filter(|value| !value.is_empty())
                         .unwrap_or("enc"),
                 )
                 .replace(
                     "{bitrate}",
                     options
-                        .map(|value| value.bitrate_label.as_str())
+                        .map(|value| value.bitrate_label.as_str()).filter(|value| !value.is_empty())
                         .unwrap_or("default"),
                 )
                 .replace("{ext}", extension);
@@ -286,8 +294,11 @@ fn resolve_output_path(
             if rendered.is_empty() || Path::new(&rendered).components().count() != 1 {
                 return Err("文件名模板不能包含目录路径".into());
             }
-            let mut file_name = PathBuf::from(rendered);
-            file_name.set_extension(extension);
+            let file_name = if rendered.to_lowercase().ends_with(&format!(".{}", extension.to_lowercase())) {
+                PathBuf::from(rendered)
+            } else {
+                PathBuf::from(format!("{rendered}.{extension}"))
+            };
             let destination = if mode == "fixedRename" {
                 Path::new(
                     options
@@ -298,7 +309,9 @@ fn resolve_output_path(
             } else {
                 parent
             };
-            destination.join(file_name)
+            if mode == "subdirRename" {
+                destination.join(ensure_simple_relative_dir(options.map(|value| value.subdirectory.as_str()).unwrap_or(""))?).join(file_name)
+            } else { destination.join(file_name) }
         }
         "subdir" => parent
             .join(ensure_simple_relative_dir(
@@ -2126,8 +2139,13 @@ fn transcode_blocking(
     two_pass: bool,
     output_options: Option<OutputOptions>,
     cancelled: Arc<AtomicBool>,
+    preprocessing: Option<workflow_script::ScriptPlan>,
     window: tauri::Window,
 ) -> Result<TranscodeBatchResult, String> {
+    if let Some(plan) = &preprocessing {
+        if audio_only || video_codec == "copy" { return Err("自定义预处理必须连接视频编码预设，不能使用仅音频或视频流复制".into()); }
+        workflow_script::input_args(&paths, plan, "", false)?;
+    }
     let input_kind = if audio_only {
         InputMediaKind::AudioVisual
     } else {
@@ -2140,7 +2158,7 @@ fn transcode_blocking(
             &format!("[SKIP] 已跳过 {} 个不支持的文件", expanded.skipped),
         );
     }
-    let files = expanded.files;
+    let files = if preprocessing.is_some() { vec![paths[0].clone()] } else { expanded.files };
     emit_log(&window, &format!("开始转码，共 {} 个文件", files.len()));
 
     let vc = video_codec.as_str();
@@ -2202,7 +2220,7 @@ fn transcode_blocking(
             "normal",
             "等待处理",
         );
-        let dur = probe_duration(p);
+        let dur = preprocessing.as_ref().map(|plan| plan.duration).unwrap_or_else(|| probe_duration(p));
         let out = match resolve_output_path(p, output_options.as_ref(), "", ext) {
             Ok(path) => path.to_string_lossy().to_string(),
             Err(error) => {
@@ -2441,9 +2459,11 @@ fn transcode_blocking(
         };
 
         // ── 音频参数 ──
-        let mut output_args = vec!["-y".into(), "-i".into(), p.clone()];
+        let mut output_args = if let Some(plan) = &preprocessing {
+            workflow_script::input_args(&paths, plan, &vf_str, !no_audio)?
+        } else { vec!["-y".into(), "-i".into(), p.clone()] };
         output_args.extend(quality.iter().cloned());
-        if !vf_str.is_empty() {
+        if preprocessing.is_none() && !vf_str.is_empty() {
             output_args.push("-vf".into());
             output_args.push(vf_str.clone());
         }
@@ -2476,9 +2496,11 @@ fn transcode_blocking(
                 std::process::id()
             ));
             let passlog_arg = passlog.to_string_lossy().to_string();
-            let mut first_pass = vec!["-y".into(), "-i".into(), p.clone()];
+            let mut first_pass = if let Some(plan) = &preprocessing {
+                workflow_script::input_args(&paths, plan, &vf_str, false)?
+            } else { vec!["-y".into(), "-i".into(), p.clone()] };
             first_pass.extend(quality.iter().cloned());
-            if !vf_str.is_empty() {
+            if preprocessing.is_none() && !vf_str.is_empty() {
                 first_pass.extend(["-vf".into(), vf_str.clone()]);
             }
             first_pass.extend([
@@ -4944,6 +4966,7 @@ async fn transcode(
     target_file_size_mb: f64,
     two_pass: bool,
     output_options: Option<OutputOptions>,
+    preprocessing: Option<workflow_script::ScriptPlan>,
     window: tauri::Window,
 ) -> Result<TranscodeBatchResult, String> {
     let cancelled = {
@@ -4992,6 +5015,7 @@ async fn transcode(
             two_pass,
             output_options,
             cancelled,
+            preprocessing,
             window,
         )
     })
@@ -5333,7 +5357,30 @@ mod tests {
             resolve_output_path(&input.to_string_lossy(), Some(&options), "_se", "mp4").unwrap();
 
         assert_eq!(output, output_root.join("sourceclip_review_se.mp4"));
+        let mut options = test_output_options("subdirRename", &output_root, "{name}.review");
+        options.subdirectory = "nested/exports".into();
+        assert_eq!(resolve_output_path(&input.to_string_lossy(), Some(&options), "", "mp4").unwrap(), root.join("nested/exports/sourceclip.review.mp4"));
+        options.subdirectory = "../outside".into();
+        assert!(resolve_output_path(&input.to_string_lossy(), Some(&options), "", "mp4").is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn output_names_preserve_dots_and_encode_labels_in_both_modes() {
+        let root = dit_test_root("encode-labels");
+        let input = root.join("clip.v2.mov");
+        let mut options = test_output_options("source", &root, "{name}_{res}_{fps}_{codec}_{bitrate}");
+        options.resolution = "1920x1080".into();
+        options.fps_label = "25fps".into();
+        options.codec_label = "H264".into();
+        options.bitrate_label = "CRF23".into();
+        let expected = root.join("clip.v2_1920x1080_25fps_H264_CRF23.mp4");
+        assert_eq!(resolve_output_path(&input.to_string_lossy(), Some(&options), "", "mp4").unwrap(), expected);
+        options.mode = "rename".into();
+        assert_eq!(resolve_output_path(&input.to_string_lossy(), Some(&options), "", "mp4").unwrap(), expected);
+        options.name_template = "{name}.{ext}".into();
+        assert_eq!(resolve_output_path(&input.to_string_lossy(), Some(&options), "", "mp4").unwrap(), root.join("clip.v2.mp4"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

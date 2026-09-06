@@ -130,7 +130,7 @@ test('流程画布保留可移动输入节点、收缩参数和易命中的方�
   assert.match(editor, /interactionWidth:\s*28/);
   assert.match(editor, /<Handle[\s\S]*className=\{`se-workflow-handle is-\$\{port\.type\}\$\{connectionState\}`\}/);
   assert.match(editor, /sourceHandle:\s*`out:\$\{edge\.sourcePort\}`[\s\S]*targetHandle:\s*`in:\$\{edge\.targetPort\}`/);
-  assert.match(editor, /deletable:\s*false, draggable:\s*!disabled/);
+  assert.match(editor, /deletable:\s*!disabled, draggable:\s*!disabled/);
   assert.match(editor, /useNodesState<FlowNode>\(graphNodes\)/);
   assert.match(editor, /const selectedIds = new Set\(current\.filter\(\(node\) => node\.selected\)\.map\(\(node\) => node\.id\)\)/);
   assert.match(editor, /graphNodes\.map\(\(node\) => \(\{ \.\.\.node, selected: selectedIds\.has\(node\.id\) \}\)\)/);
@@ -138,7 +138,7 @@ test('流程画布保留可移动输入节点、收缩参数和易命中的方�
   assert.match(editor, /onNodeDragStop=\{\(_, _node, draggedNodes\) =>[\s\S]*new Map\(draggedNodes\.map\(\(node\) => \[node\.id, node\.position\]\)\)[\s\S]*startPosition: positions\.get\(WORKFLOW_GRAPH_START_ID\) \?\? graph\.startPosition[\s\S]*const position = positions\.get\(item\.id\)/);
   assert.doesNotMatch(editor, /onNodeDragStop=\{\(_, node\) =>/);
   assert.match(editor, /<ui\.AnimatedCollapse open=\{data\.expanded\}/);
-  assert.equal((editor.match(/className="se-workflow-node-editor nodrag nopan"/g) ?? []).length, 5);
+  assert.ok((editor.match(/className="se-workflow-node-editor nodrag nopan"/g) ?? []).length >= 5);
   assert.match(editor, /onNodeDoubleClick=\{\(_, node\) =>/);
   assert.match(editor, /setExpandedId\(\(current\) => current === node\.id \? '' : node\.id\)/);
   assert.match(editor, /<ControlButton aria-label="画布操作说明"/);

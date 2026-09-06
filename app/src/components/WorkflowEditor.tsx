@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MATERIAL_DROP_EVENT, type MaterialDrop } from '../lib/materialDrag';
 import {
   Background,
   BackgroundVariant,
@@ -20,8 +21,10 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import * as ui from './ui';
-import { IconHelp, IconRedo, IconTrash, IconUndo, IconUpdate } from './icons';
+import { IconFolder, IconHelp, IconRedo, IconTrash, IconUndo, IconUpdate } from './icons';
 import { pickPath } from '../lib/ffmpeg';
+import { evaluateWorkflowScript } from '../lib/workflowScript';
+import { TemplateEditor, TEMPLATE_TOKENS } from './OutputSettings';
 import {
   PresetManageDialog,
   usePresets,
@@ -45,6 +48,9 @@ import {
   createWorkflowGraphLogic,
   createWorkflowGraphOutput,
   createWorkflowGraphProbe,
+  createWorkflowGraphMaterial,
+  createWorkflowGraphScript,
+  createWorkflowGraphOutputOverride,
   removeWorkflowGraphEdge,
   removeWorkflowGraphNode,
   workflowDefinitionNodeCounts,
@@ -60,7 +66,7 @@ import {
 } from '../lib/workflowGraph';
 
 type WorkflowPresetSets = Record<WorkflowActionKind, Preset[]>;
-type WorkflowNodeCreateKind = WorkflowActionKind | WorkflowGraphLogicKind | WorkflowGraphProbeMetric | 'filter' | 'gate' | 'output';
+type WorkflowNodeCreateKind = WorkflowActionKind | WorkflowGraphLogicKind | WorkflowGraphProbeMetric | 'filter' | 'gate' | 'output' | 'script' | 'outputOverride';
 type MenuState = { x: number; y: number; graphX: number; graphY: number; nodeId?: string; edgeId?: string } | null;
 type ActiveConnection = { nodeId: string; handleId: string; handleType: 'source' | 'target' } | null;
 type FlowNodeData = {
@@ -107,6 +113,9 @@ function presetOptions(presets: Preset[]) {
   return presets.length ? presets.map((preset) => ({ label: preset.name, value: preset.id })) : [{ label: '没有可用预设', value: '' }];
 }
 function nodeTitle(node: WorkflowGraphNode): string {
+  if (node.type === 'material') return node.path.split(/[/\\]/).pop() || '指定素材';
+  if (node.type === 'script') return '高级自定义';
+  if (node.type === 'outputOverride') return '输出设置覆盖';
   if (node.type === 'action') return WORKFLOW_ACTION_LABELS[node.kind].split(' · ').pop() ?? WORKFLOW_ACTION_LABELS[node.kind];
   if (node.type === 'filter') return '素材筛选';
   if (node.type === 'probe') return PROBE_LABELS[node.metric];
@@ -115,6 +124,8 @@ function nodeTitle(node: WorkflowGraphNode): string {
   return '文件输出';
 }
 function nodeCategory(node: WorkflowGraphNode): string {
+  if (node.type === 'material') return '来源';
+  if (node.type === 'script') return '脚本';
   if (node.type === 'action') return '执行';
   if (node.type === 'probe') return '检测';
   if (node.type === 'logic' || node.type === 'gate') return '逻辑';
@@ -156,6 +167,24 @@ function PortHandle({ nodeId, port, kind, activeConnection, isValidConnection }:
   );
 }
 
+function ScriptEditor({ script, disabled, onChange }: { script: string; disabled: boolean; onChange: (script: string) => void }) {
+  const [checking, setChecking] = useState(false);
+  const [message, setMessage] = useState('');
+  const cancelled = useRef(false);
+  useEffect(() => { cancelled.current = false; return () => { cancelled.current = true; }; }, []);
+  useEffect(() => { setMessage(''); }, [script]);
+  return <div className="se-workflow-node-editor nodrag nopan nowheel" onPointerDown={(event) => event.stopPropagation()}>
+    <label className="se-workflow-node-field"><span>素材预处理脚本</span><textarea className="se-drop-input se-workflow-script-editor" aria-label="高级自定义脚本" value={script} maxLength={65536} spellCheck={false} disabled={disabled || checking} onChange={(event) => onChange(event.target.value)} /></label>
+    <ui.Button disabled={disabled || checking} onClick={async () => {
+      setChecking(true); setMessage('');
+      try { await evaluateWorkflowScript(script, [], () => cancelled.current, true); if (!cancelled.current) setMessage('语法有效'); }
+      catch (error) { if (!cancelled.current) setMessage(String((error as Error).message || error)); }
+      finally { if (!cancelled.current) setChecking(false); }
+    }}>{checking ? '校验中' : '校验语法'}</ui.Button>
+    {message && <div className={`se-workflow-node-issue${message === '语法有效' ? ' is-valid' : ''}`} role="status">{message}</div>}
+  </div>;
+}
+
 function WorkflowNodeEditor({ node, presets, removableTrigger, disabled, onChange }: {
   node: WorkflowGraphNode;
   presets: WorkflowPresetSets;
@@ -164,6 +193,19 @@ function WorkflowNodeEditor({ node, presets, removableTrigger, disabled, onChang
   onChange: (node: WorkflowGraphNode) => void;
 }) {
   const stopDrag = (event: React.PointerEvent) => event.stopPropagation();
+  if (node.type === 'material') return <div className="se-workflow-node-editor nodrag nopan" onPointerDown={stopDrag}><label className="se-workflow-node-field"><span>素材路径</span><ui.DropInput value={node.path} onChange={(path) => onChange({ ...node, path })} disabled={disabled} /></label></div>;
+  if (node.type === 'script') return <ScriptEditor script={node.script} disabled={disabled} onChange={(script) => onChange({ ...node, script })} />;
+  if (node.type === 'outputOverride') {
+    const value = node.override;
+    const update = (patch: Partial<typeof value>) => onChange({ ...node, override: { ...value, ...patch } });
+    return <div className="se-workflow-node-editor nodrag nopan" onPointerDown={stopDrag}>
+      <label className="se-workflow-node-field"><span>输出位置</span><ui.ComboBox value={value.location} options={[{ label: '继承', value: 'inherit' }, { label: '原素材目录', value: 'source' }, { label: '原目录的子目录', value: 'subdir' }, { label: '指定目录', value: 'fixed' }]} onChange={location => update({ location: location as typeof value.location })} disabled={disabled} /></label>
+      <ui.AnimatedCollapse open={value.location === 'fixed'}><label className="se-workflow-node-field"><span>输出目录</span><div className="se-workflow-output-path"><ui.DropInput value={value.directory} onChange={directory => update({ directory })} disabled={disabled} /><ui.Button className="se-icon-btn" icon={<IconFolder size={14} />} title="选择输出目录" disabled={disabled} onClick={async () => { const directory = await pickPath('dir'); if (directory) update({ directory }); }} /></div></label></ui.AnimatedCollapse>
+      <ui.AnimatedCollapse open={value.location === 'subdir'}><label className="se-workflow-node-field"><span>子目录</span><ui.DropInput value={value.subdirectory} onChange={subdirectory => update({ subdirectory })} disabled={disabled} /></label></ui.AnimatedCollapse>
+      <label className="se-workflow-node-field"><span>文件命名</span><ui.ComboBox value={value.naming} options={[{ label: '继承', value: 'inherit' }, { label: '原名与功能后缀', value: 'default' }, { label: '自定义模板', value: 'template' }]} onChange={naming => update({ naming: naming as typeof value.naming })} disabled={disabled} /></label>
+      <ui.AnimatedCollapse open={value.naming === 'template'}><TemplateEditor value={value.nameTemplate} tokens={TEMPLATE_TOKENS} preview="" ariaLabel="覆盖文件名模板" onChange={nameTemplate => update({ nameTemplate })} disabled={disabled} /></ui.AnimatedCollapse>
+    </div>;
+  }
   if (node.type === 'action') {
     const choices = presets[node.kind];
     const selected = choices.find((preset) => preset.id === node.presetId);
@@ -232,7 +274,7 @@ const WorkflowFlowNode = memo(function WorkflowFlowNode({ id, data, selected }: 
   if (data.start) {
     return (
       <div className={`se-workflow-flow-node is-start${selected ? ' selected' : ''}`}>
-        <div className="se-workflow-node-header"><div><span>来源</span><strong>输入素材</strong></div></div>
+        <div className="se-workflow-node-header"><div><span>来源</span><strong>输入素材</strong></div><ui.Button className="se-icon-btn nodrag" icon={<IconTrash size={13} />} title="删除输入节点" onClick={() => data.onDeleteNode(id)} disabled={data.disabled} /></div>
         <div className="se-workflow-port-stack is-output">{workflowStartPorts().outputs.map((port) => <PortHandle key={port.id} nodeId={id} port={port} kind="source" activeConnection={data.activeConnection} isValidConnection={data.isValidConnection} />)}</div>
       </div>
     );
@@ -277,6 +319,19 @@ function WorkflowGraphCanvas({ graph, issue, onChange, disabled, presets, remova
   const helpDialogRef = useRef<HTMLDialogElement>(null);
   const [menu, setMenu] = useState<MenuState>(null);
   const [expandedId, setExpandedId] = useState('');
+  const viewportRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const drop = (event: Event) => {
+      const { path, x, y } = (event as CustomEvent<MaterialDrop>).detail;
+      if (disabled || !path || path.includes('\0') || !viewportRef.current
+        || document.elementFromPoint(x, y)?.closest('.se-workflow-graph-viewport') !== viewportRef.current) return;
+      const node = createWorkflowGraphMaterial(path, flow.screenToFlowPosition({ x, y }));
+      onChange({ ...graph, nodes: [...graph.nodes, node] });
+      setExpandedId(node.id);
+    };
+    window.addEventListener(MATERIAL_DROP_EVENT, drop);
+    return () => window.removeEventListener(MATERIAL_DROP_EVENT, drop);
+  }, [disabled, flow, graph, onChange]);
   const [activeConnection, setActiveConnection] = useState<ActiveConnection>(null);
   const updateNode = useCallback((next: WorkflowGraphNode) => onChange({ ...graph, nodes: graph.nodes.map((node) => node.id === next.id ? next : node) }), [graph, onChange]);
   const deleteNode = useCallback((id: string) => {
@@ -289,9 +344,9 @@ function WorkflowGraphCanvas({ graph, issue, onChange, disabled, presets, remova
     return connectWorkflowGraph(graph, connection.source, sourcePort, connection.target, targetPort) !== graph;
   }, [graph]);
   const graphNodes = useMemo<FlowNode[]>(() => [
-    { id: WORKFLOW_GRAPH_START_ID, type: 'workflow', position: graph.startPosition, deletable: false, draggable: !disabled, data: { start: true, expanded: false, disabled, presets, removableTrigger, activeConnection, isValidConnection, onChangeNode: updateNode, onDeleteNode: deleteNode } },
+    ...(graph.startEnabled === false ? [] : [{ id: WORKFLOW_GRAPH_START_ID, type: 'workflow' as const, position: graph.startPosition, deletable: !disabled, draggable: !disabled, data: { start: true, expanded: false, disabled, presets, removableTrigger, activeConnection, isValidConnection, onChangeNode: updateNode, onDeleteNode: deleteNode } }]),
     ...graph.nodes.map((node): FlowNode => ({ id: node.id, type: 'workflow', position: node.position, draggable: !disabled, deletable: !disabled, data: { graphNode: node, expanded: expandedId === node.id, disabled, presets, removableTrigger, activeConnection, isValidConnection, onChangeNode: updateNode, onDeleteNode: deleteNode } })),
-  ], [activeConnection, deleteNode, disabled, expandedId, graph.nodes, graph.startPosition, isValidConnection, presets, removableTrigger, updateNode]);
+  ], [activeConnection, deleteNode, disabled, expandedId, graph.nodes, graph.startPosition, graph.startEnabled, isValidConnection, presets, removableTrigger, updateNode]);
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(graphNodes);
   const edges = useMemo<Edge[]>(() => graph.edges.map((edge) => ({ id: edge.id, source: edge.source, sourceHandle: `out:${edge.sourcePort}`, target: edge.target, targetHandle: `in:${edge.targetPort}`, className: `se-workflow-edge is-${workflowNodePorts(graph.nodes.find((node) => node.id === edge.target)!).inputs.find((port) => port.id === edge.targetPort)?.type ?? 'media'}`, interactionWidth: 28 })), [graph.edges, graph.nodes]);
 
@@ -337,8 +392,10 @@ function WorkflowGraphCanvas({ graph, issue, onChange, disabled, presets, remova
   }, [canRedo, canUndo, disabled, onRedo, onUndo]);
   const contextItems: ui.ContextMenuItem[] = menu?.nodeId ? [
     { label: '聚焦节点', onSelect: () => void flow.fitView({ nodes: [{ id: menu.nodeId! }], duration: 280, padding: 0.45, maxZoom: 1.05 }) },
-    ...(menu.nodeId === WORKFLOW_GRAPH_START_ID ? [] : [{ label: '删除节点', danger: true, separatorBefore: true, disabled, onSelect: () => deleteNode(menu.nodeId!) }]),
+    { label: '删除节点', danger: true, separatorBefore: true, disabled, onSelect: () => deleteNode(menu.nodeId!) },
   ] : menu?.edgeId ? [{ label: '删除连线', danger: true, disabled, onSelect: () => onChange(removeWorkflowGraphEdge(graph, menu.edgeId!)) }] : [
+    { label: '输入素材', groupLabel: '来源', disabled: disabled || graph.startEnabled !== false, onSelect: () => onChange({ ...graph, startEnabled: true, startPosition: { x: menu!.graphX, y: menu!.graphY } }) },
+    { label: '高级自定义', groupLabel: '脚本', disabled, onSelect: () => createAtMenu('script') },
     ...(['backup', 'transcode', 'mix', 'check'] as WorkflowActionKind[]).map((kind, index) => ({ label: WORKFLOW_ACTION_LABELS[kind].split(' · ').pop() ?? WORKFLOW_ACTION_LABELS[kind], groupLabel: index === 0 ? '执行' : undefined, disabled, onSelect: () => createAtMenu(kind) })),
     { label: '长边', groupLabel: '检测', disabled, onSelect: () => createAtMenu('long_edge') },
     { label: '帧率', disabled, onSelect: () => createAtMenu('frame_rate') },
@@ -350,12 +407,13 @@ function WorkflowGraphCanvas({ graph, issue, onChange, disabled, presets, remova
     { label: '素材计数', disabled, onSelect: () => createAtMenu('count') },
     { label: '条件分流', groupLabel: '路由', disabled, onSelect: () => createAtMenu('gate') },
     { label: '素材筛选', disabled, onSelect: () => createAtMenu('filter') },
-    { label: '文件输出', groupLabel: '输出', disabled, onSelect: () => createAtMenu('output') },
+    { label: '输出设置覆盖', groupLabel: '输出', disabled, onSelect: () => createAtMenu('outputOverride') },
+    { label: '文件输出', disabled, onSelect: () => createAtMenu('output') },
     { label: '适应全部节点', groupLabel: '画布', onSelect: () => void flow.fitView({ duration: 280, padding: 0.18 }) },
   ];
 
   return (
-    <div className="se-workflow-graph-viewport" onContextMenu={(event) => event.stopPropagation()} onKeyDown={onHistoryKeyDown}>
+    <div ref={viewportRef} className="se-workflow-graph-viewport" onContextMenu={(event) => event.stopPropagation()} onKeyDown={onHistoryKeyDown}>
       <ReactFlow<FlowNode, Edge>
         nodes={nodes}
         edges={edges}
@@ -379,8 +437,11 @@ function WorkflowGraphCanvas({ graph, issue, onChange, disabled, presets, remova
             }),
           });
         }}
-        onNodesDelete={(deleted) => deleted.filter((node) => node.id !== WORKFLOW_GRAPH_START_ID).forEach((node) => deleteNode(node.id))}
-        onEdgesDelete={(deleted) => onChange({ ...graph, edges: graph.edges.filter((edge) => !deleted.some((item) => item.id === edge.id)) })}
+        onDelete={({ nodes: deleted, edges: deletedEdges }) => {
+          let next = graph;
+          for (const node of deleted) next = removeWorkflowGraphNode(next, node.id);
+          onChange({ ...next, edges: next.edges.filter((edge) => !deletedEdges.some((item) => item.id === edge.id)) });
+        }}
         onPaneContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); const point = flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }); setMenu({ x: event.clientX, y: event.clientY, graphX: point.x, graphY: point.y }); }}
         onNodeContextMenu={(event, node) => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, graphX: node.position.x, graphY: node.position.y, nodeId: node.id }); }}
         onEdgeContextMenu={(event, edge) => { event.preventDefault(); event.stopPropagation(); const point = flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }); setMenu({ x: event.clientX, y: event.clientY, graphX: point.x, graphY: point.y, edgeId: edge.id }); }}
@@ -422,7 +483,7 @@ function WorkflowGraphCanvas({ graph, issue, onChange, disabled, presets, remova
             <div><dt>连线</dt><dd>从输出连接点拖至兼容的输入连接点</dd></div>
             <div><dt>缩放</dt><dd>滚动鼠标滚轮</dd></div>
             <div><dt>菜单</dt><dd>右击画布、节点或连线</dd></div>
-            <div><dt>删除</dt><dd>选中后按 Delete；输入节点不会被删除</dd></div>
+            <div><dt>删除</dt><dd>选中后按 Delete</dd></div>
           </dl>
           <ui.Button onClick={() => helpDialogRef.current?.close()}>关闭</ui.Button>
         </div>
@@ -469,7 +530,9 @@ export function WorkflowEditor({ value, onChange, disabled, issue }: {
     updateGraph(next);
   }, [futureGraphs, graph, updateGraph]);
   const createNode = useCallback((kind: WorkflowNodeCreateKind, position: { x: number; y: number }) => {
-    const node = kind === 'filter' ? createWorkflowGraphFilter(position)
+    const node = kind === 'outputOverride' ? createWorkflowGraphOutputOverride(position)
+      : kind === 'script' ? createWorkflowGraphScript(position)
+      : kind === 'filter' ? createWorkflowGraphFilter(position)
       : kind === 'gate' ? createWorkflowGraphGate(position)
         : kind === 'output' ? createWorkflowGraphOutput(position)
           : kind === 'long_edge' || kind === 'frame_rate' || kind === 'list_index' || kind === 'reverse_index' ? createWorkflowGraphProbe(kind, position)

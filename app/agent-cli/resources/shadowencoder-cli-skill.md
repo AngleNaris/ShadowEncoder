@@ -98,7 +98,27 @@ Node kinds are:
 - Logic: `count`, `math`, `compare`, `boolean`
 - Routing/output: `gate`, `output`
 
-Read `workflowNodeFields` and `workflowEdgeFields` from `schema show workflow`. The movable input node has the fixed ID `__workflow_start__` and output port `media`; it cannot be removed. An output port can fan out to multiple targets. Edge creation rejects unknown or mismatched ports, duplicate edges, self-connections, and cycles.
+Read `workflowNodeFields`, `workflowEdgeFields`, and `scriptContract` from `schema show workflow`. The default input has ID `__workflow_start__` and output port `media`. It can be removed with `workflow node-remove` and restored with `workflow node-set <workflow-id> __workflow_start__ enabled true --revision <n>`. Edge creation rejects unknown or mismatched ports, duplicate edges, self-connections, and cycles.
+
+### Advanced Custom Scripts
+
+Create a `script` node with `workflow node-add`. Read it using `preset show`, write one UTF-8 JavaScript function body using `workflow script-set <workflow-id> <node-id> --file <path.js> --revision <n>`, then check connections with `workflow validate <workflow-id>`. Validation checks graph structure; the editor checks script syntax, and a task run checks execution. Mutations use the existing revision and undo history.
+
+Create a `material` node and set its `path` field to process an individual file. It has one `media` output and no inputs. Agent task runs require that each material path is selected in the visible material list. Connect material -> script -> transcode (select an encode preset with presetId/presetRevision) -> output. Multiple media connections merge in connection insertion order, preserving each incoming list order. Change the order explicitly in the script by indexing `inputs` and choosing FFmpeg input labels.
+
+Scripts receive `inputs: Array<{name,index,width,height,fps,duration}>`. Return only `{filterComplex, duration}`, with duration 0.1 to 86400 seconds and final video label `[out]`. Encoding parameters, format, output paths and preset IDs in results are rejected. Scripts only prepare media filters; the downstream transcode node applies its preset in the same FFmpeg run with no intermediate video. Audio follows the encode preset and comes from the first input. Video stream copy and audio-only presets cannot consume a video preprocessing plan. Encode before another script or media probe. Scripts run in a network-disabled worker with no app IPC, shell or filesystem access, with a 3-second planning timeout, at most 32 input files, and 64K characters of code. Pure media filters are allowlisted by the native runner; file/network/plugin/command filters and file-backed options are rejected.
+
+Create `outputOverride` before a transcode or mix node to override output settings on that branch without changing the preset. Set one scalar at a time: `override.location` (`inherit|source|subdir|fixed`), `override.directory`, `override.subdirectory`, `override.naming` (`inherit|default|template`), and `override.nameTemplate`. Later explicit settings win independently; inherit preserves earlier overrides or the preset. It does not relocate files already produced. Unify conflicting overrides before merging composition inputs, or put the override after the script. Read `outputOverrideContract` in the workflow schema.
+
+Example function body for two ordered inputs:
+
+```js
+if (inputs.length !== 2) throw new Error('Select exactly two materials');
+return {
+  filterComplex: '[0:v]scale=640:360,setsar=1[a];[1:v]scale=640:360,setsar=1[b];[a][b]hstack=inputs=2[out]',
+  duration: 10
+};
+```
 
 ## Task Commands
 

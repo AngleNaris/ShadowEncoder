@@ -1,4 +1,6 @@
 import type { WorkflowActionKind, WorkflowActionNode, WorkflowDefinition } from './workflow';
+import type { ScriptPlan } from './workflowScript';
+import { mergeOutputOverride, type WorkflowOutputOverride } from './workflowOutput.ts';
 import { isAudioPath, isVideoPath } from './mediaExtensions.ts';
 
 export type WorkflowPortType = 'media' | 'bool' | 'number' | 'report' | 'error';
@@ -46,7 +48,35 @@ export type WorkflowGraphOutputNode = {
   output: { mode: 'collect' | 'copy' | 'move' | 'restore'; directory: string; writeLog: boolean };
   position: WorkflowGraphPosition;
 };
+export type WorkflowGraphMaterialNode = {
+  id: string; type: 'material'; path: string; position: WorkflowGraphPosition;
+};
+export type WorkflowGraphScriptNode = {
+  id: string; type: 'script'; script: string; position: WorkflowGraphPosition;
+};
+export type WorkflowGraphOutputOverrideNode = {
+  id: string; type: 'outputOverride'; override: WorkflowOutputOverride; position: WorkflowGraphPosition;
+};
+export function createWorkflowGraphOutputOverride(position = { x: 280, y: 120 }): WorkflowGraphOutputOverrideNode {
+  return { id: graphId('workflow-output-override'), type: 'outputOverride', override: { location: 'inherit', naming: 'inherit', directory: '', subdirectory: 'ShadowEncoder', nameTemplate: '{name}{suffix}' }, position };
+}
+export const DEFAULT_WORKFLOW_SCRIPT = `// inputs follow connection order; reorder indices to change the layout.
+const order = inputs.map((_, i) => i);
+const filters = order.map((index, i) =>
+  \`[\${index}:v]scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS[v\${i}]\`);
+filters.push(order.map((_, i) => \`[v\${i}]\`).join('') +
+  (order.length > 1 ? \`hstack=inputs=\${order.length}[out]\` : 'null[out]'));
+return { filterComplex: filters.join(';'), duration: 10 };`;
+export function createWorkflowGraphMaterial(path: string, position = { x: 0, y: 260 }): WorkflowGraphMaterialNode {
+  return { id: graphId('workflow-material'), type: 'material', path, position };
+}
+export function createWorkflowGraphScript(position = { x: 280, y: 120 }): WorkflowGraphScriptNode {
+  return { id: graphId('workflow-script'), type: 'script', script: DEFAULT_WORKFLOW_SCRIPT, position };
+}
 export type WorkflowGraphNode = WorkflowGraphActionNode
+  | WorkflowGraphOutputOverrideNode
+  | WorkflowGraphMaterialNode
+  | WorkflowGraphScriptNode
   | WorkflowGraphFilterNode
   | WorkflowGraphProbeNode
   | WorkflowGraphLogicNode
@@ -69,6 +99,7 @@ export type WorkflowGraphEdge = {
 };
 
 export type WorkflowGraph = {
+  startEnabled?: boolean;
   startPosition: WorkflowGraphPosition;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
@@ -79,6 +110,8 @@ export type WorkflowAsset = {
   path: string;
   sourcePath: string;
   index: number;
+  preprocessing?: { paths: string[]; plan: ScriptPlan };
+  outputOverride?: WorkflowOutputOverride;
 };
 export type WorkflowMediaValue = { type: 'media'; assets: WorkflowAsset[] };
 export type WorkflowBoolValue = { type: 'bool'; values: Map<string, boolean>; batch?: boolean };
@@ -89,6 +122,8 @@ export type WorkflowPortValue = WorkflowMediaValue | WorkflowBoolValue | Workflo
 export type WorkflowNodeOutputs = Record<string, WorkflowPortValue | undefined>;
 
 export type WorkflowGraphRunHooks = {
+  runMaterial?: (node: WorkflowGraphMaterialNode) => Promise<WorkflowNodeOutputs>;
+  runScript?: (node: WorkflowGraphScriptNode, assets: WorkflowAsset[]) => Promise<WorkflowNodeOutputs>;
   runAction: (node: WorkflowGraphActionNode, assets: WorkflowAsset[]) => Promise<WorkflowNodeOutputs>;
   runProbe: (node: WorkflowGraphProbeNode, assets: WorkflowAsset[]) => Promise<WorkflowNodeOutputs>;
   runOutput?: (node: WorkflowGraphOutputNode, assets: WorkflowAsset[], inputs: Record<string, WorkflowPortValue>) => Promise<WorkflowNodeOutputs>;
@@ -131,6 +166,9 @@ function isLogicKind(value: unknown): value is WorkflowGraphLogicKind {
 export function workflowNodePorts(node: WorkflowGraphNode): { inputs: WorkflowGraphPort[]; outputs: WorkflowGraphPort[] } {
   const mediaIn: WorkflowGraphPort = { id: 'media', type: 'media', label: '素材', required: true };
   const mediaOut: WorkflowGraphPort = { id: 'media', type: 'media', label: '素材' };
+  if (node.type === 'material') return { inputs: [], outputs: [mediaOut] };
+  if (node.type === 'outputOverride') return { inputs: [mediaIn], outputs: [mediaOut] };
+  if (node.type === 'script') return { inputs: [mediaIn], outputs: [mediaOut, { id: 'error', type: 'error', label: '错误' }] };
   if (node.type === 'action') {
     return {
       inputs: [mediaIn],
@@ -207,7 +245,15 @@ export function normalizeWorkflowGraph(value: unknown): WorkflowGraph {
     ids.add(id);
     const sourcePosition = item.position && typeof item.position === 'object' ? item.position as Record<string, unknown> : {};
     const position = { x: finite(sourcePosition.x, 280 + (index % 3) * 300), y: finite(sourcePosition.y, 80 + Math.floor(index / 3) * 180) };
-    if (item.type === 'action') {
+    if (item.type === 'material') {
+      nodes.push({ id, type: 'material', path: text(item.path), position });
+    } else if (item.type === 'script') {
+      nodes.push({ id, type: 'script', script: text(item.script), position });
+    } else if (item.type === 'outputOverride') {
+      const node = createWorkflowGraphOutputOverride(position);
+      const rawOverride = item.override && typeof item.override === 'object' ? item.override as Record<string, unknown> : {};
+      nodes.push({ ...node, id, override: { ...mergeOutputOverride(node.override, rawOverride as WorkflowOutputOverride), directory: text(rawOverride.directory), subdirectory: text(rawOverride.subdirectory), nameTemplate: text(rawOverride.nameTemplate) } });
+    } else if (item.type === 'action') {
       nodes.push({ id, type: 'action', kind: isActionKind(item.kind) ? item.kind : 'transcode', presetId: text(item.presetId), presetRevision: Math.max(1, Math.trunc(finite(item.presetRevision, 1, 1, Number.MAX_SAFE_INTEGER))), position });
     } else if (item.type === 'filter') {
       const filter = item.filter && typeof item.filter === 'object' ? item.filter as Record<string, unknown> : {};
@@ -250,7 +296,7 @@ export function normalizeWorkflowGraph(value: unknown): WorkflowGraph {
     edges.push({ id: text(item.id) || graphId('workflow-edge'), source, sourcePort, target, targetPort });
   }
   const start = raw.startPosition && typeof raw.startPosition === 'object' ? raw.startPosition as Record<string, unknown> : {};
-  return { startPosition: { x: finite(start.x, 0), y: finite(start.y, 68) }, nodes, edges };
+  return { startEnabled: raw.startEnabled !== false, startPosition: { x: finite(start.x, 0), y: finite(start.y, 68) }, nodes, edges };
 }
 
 function adjacency(graph: WorkflowGraph): Map<string, string[]> {
@@ -266,6 +312,7 @@ export function workflowGraphWouldCreateCycle(graph: WorkflowGraph, source: stri
   return visit(target);
 }
 export function connectWorkflowGraph(graph: WorkflowGraph, source: string, sourcePort: string, target: string, targetPort: string): WorkflowGraph {
+  if (source === WORKFLOW_GRAPH_START_ID && graph.startEnabled === false) return graph;
   const sourceType = source === WORKFLOW_GRAPH_START_ID
     ? workflowStartPorts().outputs.find((port) => port.id === sourcePort)?.type
     : graph.nodes.find((node) => node.id === source) && workflowNodePorts(graph.nodes.find((node) => node.id === source)!).outputs.find((port) => port.id === sourcePort)?.type;
@@ -279,15 +326,19 @@ export function removeWorkflowGraphEdge(graph: WorkflowGraph, edgeId: string): W
   return { ...graph, edges: graph.edges.filter((edge) => edge.id !== edgeId) };
 }
 export function removeWorkflowGraphNode(graph: WorkflowGraph, nodeId: string): WorkflowGraph {
-  return { ...graph, nodes: graph.nodes.filter((node) => node.id !== nodeId), edges: graph.edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId) };
+  return { ...graph, ...(nodeId === WORKFLOW_GRAPH_START_ID ? { startEnabled: false } : {}), nodes: graph.nodes.filter((node) => node.id !== nodeId), edges: graph.edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId) };
 }
 
 export function workflowGraphIssues(graph: WorkflowGraph): string[] {
   const issues: string[] = [];
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
   const startEdges = graph.edges.filter((edge) => edge.source === WORKFLOW_GRAPH_START_ID);
-  if (graph.nodes.length > 0 && startEdges.length === 0) issues.push('流程未连接输入节点');
+  const materials = graph.nodes.filter((node) => node.type === 'material');
+  if ((graph.startEnabled === false || startEdges.length === 0) && materials.length === 0) issues.push('流程未连接输入节点');
+  if (!graph.nodes.some((node) => node.type === 'output')) issues.push('流程需要至少一个文件输出节点');
   for (const edge of graph.edges) {
+    if (edge.source === WORKFLOW_GRAPH_START_ID && graph.startEnabled === false) issues.push('连线引用了已删除的输入节点');
+    if (workflowGraphWouldCreateCycle(graph, edge.source, edge.target)) issues.push('流程包含环路');
     const sourceType = edge.source === WORKFLOW_GRAPH_START_ID
       ? workflowStartPorts().outputs.find((port) => port.id === edge.sourcePort)?.type
       : nodeById.get(edge.source) && workflowNodePorts(nodeById.get(edge.source)!).outputs.find((port) => port.id === edge.sourcePort)?.type;
@@ -298,11 +349,37 @@ export function workflowGraphIssues(graph: WorkflowGraph): string[] {
   const map = adjacency(graph);
   const walk = (id: string) => { if (!reachable.has(id)) { reachable.add(id); (map.get(id) ?? []).forEach(walk); } };
   startEdges.forEach((edge) => walk(edge.target));
+  materials.forEach((node) => walk(node.id));
   if (reachable.size !== graph.nodes.length) issues.push('存在未接入流程的节点');
   for (const node of graph.nodes) {
+    if (node.type === 'material' && !node.path.trim()) issues.push('素材节点未指定文件');
+    if (node.type === 'script' && (!node.script.trim() || node.script.length > 65536)) issues.push('高级自定义节点脚本为空或超过 64K 字符');
+    if (node.type === 'script' || node.type === 'outputOverride') {
+      const seen = new Set<string>();
+      const checkNext = (id: string) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        const next = nodeById.get(id);
+        if (!next) return;
+        if (next.type === 'action' && (next.kind === 'transcode' || (node.type === 'outputOverride' && next.kind === 'mix'))) return;
+        if ((node.type === 'script' ? ['output', 'action', 'probe', 'script'] : ['output', 'action']).includes(next.type)) {
+          issues.push(node.type === 'script' ? '自定义预处理必须先连接编码节点，再输出或执行其他处理' : '输出设置覆盖请放在编码或混音节点之前');
+          return;
+        }
+        graph.edges.filter(edge => edge.source === id && edge.targetPort === 'media').forEach(edge => checkNext(edge.target));
+      };
+      graph.edges.filter(edge => edge.source === node.id && edge.sourcePort === 'media').forEach(edge => checkNext(edge.target));
+    }
+    if (node.type === 'outputOverride') {
+      if (node.override.location === 'fixed' && !node.override.directory.trim()) issues.push('输出设置覆盖节点未选择目录');
+      if (node.override.location === 'subdir' && (!node.override.subdirectory.trim() || /(^|[/\\])\.\.([/\\]|$)|^[\/\\]|:/.test(node.override.subdirectory))) issues.push('输出设置覆盖节点的子目录无效');
+      if (node.override.naming === 'template' && !node.override.nameTemplate.trim()) issues.push('输出设置覆盖节点未填写命名模板');
+    }
+    if (node.type === 'output' && (node.output.mode === 'copy' || node.output.mode === 'move' || node.output.writeLog) && !node.output.directory.trim()) issues.push('文件输出节点未选择目录');
+    if (!graph.edges.some((edge) => edge.source === node.id) && node.type !== 'output') issues.push('存在未连接后续节点或文件输出的节点');
     const connected = new Set(graph.edges.filter((edge) => edge.target === node.id).map((edge) => edge.targetPort));
     const missing = workflowNodePorts(node).inputs.filter((port) => port.required && !connected.has(port.id));
-    if (missing.length > 0 && reachable.has(node.id)) issues.push(`${node.type === 'gate' ? '分流' : '节点'}缺少${missing.map((port) => port.label).join('、')}输入`);
+    if (missing.length > 0) issues.push(`${node.type === 'gate' ? '分流' : '节点'}缺少${missing.map((port) => port.label).join('、')}输入`);
   }
   return [...new Set(issues)];
 }
@@ -319,7 +396,10 @@ export function workflowGraphForDefinition(definition: WorkflowDefinition) { ret
 
 function dedupeAssets(assets: WorkflowAsset[]): WorkflowAsset[] {
   const seen = new Set<string>();
-  return assets.filter((asset) => !seen.has(asset.id) && !!seen.add(asset.id));
+  return assets.filter((asset) => {
+    const key = JSON.stringify([asset.id, asset.path, asset.outputOverride]);
+    return !seen.has(key) && !!seen.add(key);
+  });
 }
 export function filterWorkflowGraphAssets(node: WorkflowGraphFilterNode, assets: WorkflowAsset[]): WorkflowAsset[] {
   const needle = node.filter.nameIncludes.trim().toLocaleLowerCase();
@@ -351,7 +431,8 @@ function boolForAsset(value: WorkflowBoolValue, asset: WorkflowAsset): boolean {
 function numberMap(value: WorkflowNumberValue, transform: (number: number) => number): WorkflowNumberValue {
   return { type: 'number', values: new Map([...value.values].map(([key, number]) => [key, transform(number)])), batch: value.batch == null ? undefined : transform(value.batch) };
 }
-function executeBuiltin(node: Exclude<WorkflowGraphNode, WorkflowGraphActionNode | WorkflowGraphProbeNode | WorkflowGraphOutputNode>, inputs: Record<string, WorkflowPortValue>): WorkflowNodeOutputs {
+function executeBuiltin(node: Exclude<WorkflowGraphNode, WorkflowGraphActionNode | WorkflowGraphProbeNode | WorkflowGraphOutputNode | WorkflowGraphMaterialNode | WorkflowGraphScriptNode>, inputs: Record<string, WorkflowPortValue>): WorkflowNodeOutputs {
+  if (node.type === 'outputOverride') return { media: { type: 'media', assets: (inputs.media as WorkflowMediaValue).assets.map(asset => ({ ...asset, outputOverride: mergeOutputOverride(asset.outputOverride, node.override) })) } };
   if (node.type === 'filter') {
     const media = inputs.media as WorkflowMediaValue;
     return { media: { type: 'media', assets: filterWorkflowGraphAssets(node, media.assets) } };
@@ -422,12 +503,18 @@ export async function executeWorkflowGraphDAG(graph: WorkflowGraph, initialPaths
     }
   };
 
-  for (const edge of outgoing.get(WORKFLOW_GRAPH_START_ID) ?? []) settle(edge, edge.sourcePort === WORKFLOW_GRAPH_START_PORT ? initial : null);
+  if (graph.startEnabled !== false) for (const edge of outgoing.get(WORKFLOW_GRAPH_START_ID) ?? []) settle(edge, edge.sourcePort === WORKFLOW_GRAPH_START_PORT ? initial : null);
+  for (const node of graph.nodes) if (node.type === 'material') ready.push({ node, inputs: {} });
   while (ready.length > 0 && !(hooks.isCancelled?.() ?? false)) {
     const batch = ready;
     ready = [];
     const results = await Promise.all(batch.map(async ({ node, inputs }) => {
       try {
+        if (node.type === 'material') return { node, result: hooks.runMaterial ? await hooks.runMaterial(node) : { media: { type: 'media', assets: [{ id: node.id, path: node.path, sourcePath: node.path, index: 0 }] } } as WorkflowNodeOutputs };
+        if (node.type === 'script') {
+          if (!hooks.runScript) throw new Error('高级自定义脚本执行器不可用');
+          return { node, result: await hooks.runScript(node, (inputs.media as WorkflowMediaValue).assets) };
+        }
         if (node.type === 'action') return { node, result: await hooks.runAction(node, (inputs.media as WorkflowMediaValue).assets) };
         if (node.type === 'probe') return { node, result: await hooks.runProbe(node, (inputs.media as WorkflowMediaValue).assets) };
         if (node.type === 'output') return { node, result: hooks.runOutput ? await hooks.runOutput(node, (inputs.media as WorkflowMediaValue | undefined)?.assets ?? [], inputs) : { media: inputs.media, report: inputs.report } };
@@ -436,6 +523,7 @@ export async function executeWorkflowGraphDAG(graph: WorkflowGraph, initialPaths
         const message = String((error as Error)?.message || error);
         const media = inputs.media as WorkflowMediaValue | undefined;
         const values = new Map((media?.assets ?? []).map((asset) => [asset.id, message]));
+        if (!values.size) values.set(node.id, message);
         return { node, result: { error: { type: 'error', values } as WorkflowErrorValue } as WorkflowNodeOutputs };
       }
     }));

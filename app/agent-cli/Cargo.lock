@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "shadowencoder-agent-protocol"
-version = "2.2.6"
+version = "2.2.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "shadowencoder-cli"
-version = "2.2.6"
+version = "2.2.7"
 dependencies = [
  "serde_json",
  "shadowencoder-agent-protocol",

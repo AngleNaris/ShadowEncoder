@@ -2,6 +2,8 @@ import { useRef } from 'react';
 import * as ui from './ui';
 import { IconFolder } from './icons';
 import { pickPath, type OutputSettings } from '../lib/ffmpeg';
+import { buildEncodeNameLabels, type EncodeNameLabels } from '../lib/outputNaming';
+export { buildEncodeNameLabels, type EncodeNameLabels } from '../lib/outputNaming';
 
 export type OutputFormState = {
   outputMode: OutputSettings['mode'];
@@ -21,77 +23,6 @@ export const DEFAULT_OUTPUT_FORM: OutputFormState = {
   outputDirectory: '',
 };
 
-/** 供预览/透传的编码命名标签 */
-export type EncodeNameLabels = {
-  resolution?: string;
-  fpsLabel?: string;
-  codecLabel?: string;
-  bitrateLabel?: string;
-};
-
-/** 前端生成编码命名标签（与后端逻辑对齐，用于预览） */
-export function buildEncodeNameLabels(params: {
-  scaleW?: number;
-  scaleH?: number;
-  keepRes?: boolean;
-  fps?: number;
-  videoCodec?: string;
-  rateMode?: string;
-  videoBitrate?: number;
-  crf?: number;
-  targetFileSizeMb?: number;
-  /** 源分辨率（keepRes 或未指定缩放时用于预览） */
-  sourceWidth?: number;
-  sourceHeight?: number;
-  sourceFps?: number;
-}): EncodeNameLabels {
-  const codecMap: Record<string, string> = {
-    libx264: 'H264', h264_nvenc: 'H264', h264_amf: 'H264', h264_qsv: 'H264',
-    libx265: 'H265', hevc_nvenc: 'H265', hevc_amf: 'H265', hevc_qsv: 'H265',
-    libsvtav1: 'AV1', 'libaom-av1': 'AV1', av1_nvenc: 'AV1', av1_amf: 'AV1', av1_qsv: 'AV1',
-    libvpx: 'VP8', 'libvpx-vp9': 'VP9',
-    mpeg4: 'MPEG4', mpeg2video: 'MPEG2',
-    prores_ks: 'ProRes', prores: 'ProRes',
-    dnxhd: 'DNxHR', dnxhr: 'DNxHR',
-    mjpeg: 'MJPEG', ffv1: 'FFV1', gif: 'GIF', copy: 'copy',
-  };
-  const sw = params.scaleW ?? 0;
-  const sh = params.scaleH ?? 0;
-  let resolution = 'orig';
-  if (sw > 0 && sh > 0) resolution = `${sw}x${sh}`;
-  else if ((params.sourceWidth ?? 0) > 0 && (params.sourceHeight ?? 0) > 0) {
-    resolution = `${params.sourceWidth}x${params.sourceHeight}`;
-  }
-
-  const fps = params.fps ?? 0;
-  let fpsLabel = 'orig';
-  const fpsVal = fps > 0 ? fps : (params.sourceFps ?? 0);
-  if (fpsVal > 0) {
-    fpsLabel = Math.abs(fpsVal - Math.round(fpsVal)) < 0.01
-      ? `${Math.round(fpsVal)}fps`
-      : `${parseFloat(fpsVal.toFixed(2))}fps`;
-  }
-
-  const codec = params.videoCodec || '';
-  const codecLabel = codecMap[codec] || codec || 'enc';
-
-  const rateMode = params.rateMode || 'crf';
-  const vb = params.videoBitrate ?? 0;
-  const crf = params.crf ?? 0;
-  const sizeMb = params.targetFileSizeMb ?? 0;
-  let bitrateLabel = 'default';
-  if (rateMode === 'filesize' && sizeMb > 0) {
-    bitrateLabel = Number.isInteger(sizeMb) ? `${sizeMb}MB` : `${sizeMb.toFixed(1)}MB`;
-  } else if (rateMode === 'bitrate' && vb > 0) {
-    if (vb >= 1000 && vb % 1000 === 0) bitrateLabel = `${vb / 1000}Mbps`;
-    else if (vb >= 1000) bitrateLabel = `${(vb / 1000).toFixed(1)}Mbps`;
-    else bitrateLabel = `${vb}k`;
-  } else if (crf > 0) {
-    bitrateLabel = `CRF${crf}`;
-  }
-
-  return { resolution, fpsLabel, codecLabel, bitrateLabel };
-}
 
 export const OUTPUT_MODE_OPTIONS = [
   { label: '原文件旁边', value: 'source' },
@@ -166,7 +97,7 @@ export type TemplateTokenOption = {
   title: string;
 };
 
-const TEMPLATE_TOKENS: TemplateTokenOption[] = [
+export const TEMPLATE_TOKENS: TemplateTokenOption[] = [
   { token: '{name}', label: '素材名', title: '插入原素材名称（空格会自动移除）' },
   { token: '{res}', label: '分辨率', title: '插入输出分辨率，如 1920x1080' },
   { token: '{fps}', label: '帧率', title: '插入输出帧率，如 25fps' },
@@ -190,10 +121,7 @@ function withExtension(value: string, extension: string) {
   const trimmed = value.trim().replace(/\s+/g, '') || '素材名称';
   const suffix = `.${ext}`;
   if (trimmed.toLocaleLowerCase().endsWith(suffix.toLocaleLowerCase())) return trimmed;
-  const lastSlash = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-  const lastDot = trimmed.lastIndexOf('.');
-  const base = lastDot > lastSlash ? trimmed.slice(0, lastDot) : trimmed;
-  return `${base}${suffix}`;
+  return `${trimmed}${suffix}`;
 }
 
 function previewTemplate(
@@ -204,13 +132,13 @@ function previewTemplate(
   encodeLabels?: EncodeNameLabels,
 ) {
   const ext = extension.replace(/^\.+/, '') || 'mp4';
-  const res = safePreviewPart(encodeLabels?.resolution || '', '1920x1080');
-  const fps = safePreviewPart(encodeLabels?.fpsLabel || '', '25fps');
-  const codec = safePreviewPart(encodeLabels?.codecLabel || '', 'H264');
-  const bitrate = safePreviewPart(encodeLabels?.bitrateLabel || '', 'CRF23');
+  const res = safePreviewPart(encodeLabels?.resolution || '', 'orig');
+  const fps = safePreviewPart(encodeLabels?.fpsLabel || '', 'orig');
+  const codec = safePreviewPart(encodeLabels?.codecLabel || '', 'enc');
+  const bitrate = safePreviewPart(encodeLabels?.bitrateLabel || '', 'default');
   const replacements: [string, string][] = [
     ['{name}', '素材名称'],
-    ['{preset}', safePreviewPart(presetName, '预设名称')],
+    ['{preset}', safePreviewPart(presetName, '')],
     ['{suffix}', defaultSuffix],
     ['{res}', res],
     ['{resolution}', res],
@@ -219,12 +147,12 @@ function previewTemplate(
     ['{bitrate}', bitrate],
     ['{ext}', ext],
   ];
-  const fallback = encodeLabels ? DEFAULT_ENCODE_NAME_TEMPLATE : '{name}{suffix}';
+  const fallback = '{name}{suffix}';
   const rendered = replacements.reduce(
     (current, [token, replacement]) => current.split(token).join(replacement),
     template.trim() || fallback,
   );
-  return withExtension(rendered, ext);
+  return withExtension(safePreviewPart(rendered, '素材名称'), ext);
 }
 
 function sourceFilenamePreview(
@@ -235,10 +163,10 @@ function sourceFilenamePreview(
 ) {
   const ext = extension.replace(/^\.+/, '') || 'mp4';
   if (encodeLabels?.resolution || encodeLabels?.fpsLabel || encodeLabels?.codecLabel || encodeLabels?.bitrateLabel) {
-    const res = safePreviewPart(encodeLabels.resolution || '', '1920x1080');
-    const fps = safePreviewPart(encodeLabels.fpsLabel || '', '25fps');
-    const codec = safePreviewPart(encodeLabels.codecLabel || '', 'H264');
-    const bitrate = safePreviewPart(encodeLabels.bitrateLabel || '', 'CRF23');
+    const res = safePreviewPart(encodeLabels.resolution || '', 'orig');
+    const fps = safePreviewPart(encodeLabels.fpsLabel || '', 'orig');
+    const codec = safePreviewPart(encodeLabels.codecLabel || '', 'enc');
+    const bitrate = safePreviewPart(encodeLabels.bitrateLabel || '', 'default');
     return `素材名称_${res}_${fps}_${codec}_${bitrate}.${ext}`;
   }
   const preset = presetName.trim() ? `_${safePreviewPart(presetName, '预设名称')}` : defaultSuffix;

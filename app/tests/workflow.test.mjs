@@ -42,9 +42,12 @@ test('旧流程结构不会迁移，图只接受显式类型端口', () => {
 test('输入素材可同时连接多个编码节点并并行执行', async () => {
   const first = createWorkflowGraphAction('transcode');
   const second = createWorkflowGraphAction('transcode');
-  let graph = { ...createWorkflowGraph(), nodes: [first, second] };
+  const output = createWorkflowGraphOutput();
+  let graph = { ...createWorkflowGraph(), nodes: [first, second, output] };
   graph = connectWorkflowGraph(graph, WORKFLOW_GRAPH_START_ID, 'media', first.id, 'media');
   graph = connectWorkflowGraph(graph, WORKFLOW_GRAPH_START_ID, 'media', second.id, 'media');
+  graph = connectWorkflowGraph(graph, first.id, 'media', output.id, 'media');
+  graph = connectWorkflowGraph(graph, second.id, 'media', output.id, 'media');
   assert.deepEqual(workflowGraphIssues(graph), []);
   let active = 0;
   let maxActive = 0;
@@ -58,7 +61,7 @@ test('输入素材可同时连接多个编码节点并并行执行', async () =>
     },
   }));
   assert.equal(maxActive, 2);
-  assert.deepEqual(result.executed, [first.id, second.id]);
+  assert.deepEqual(result.executed, [first.id, second.id, output.id]);
 });
 
 test('长边检测通过数值比较和 Gate 将素材分流到不同预设', async () => {

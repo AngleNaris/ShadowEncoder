@@ -587,15 +587,29 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
         "fieldDefinitions": field_definitions,
         "listFields": list_fields,
         "workflowNodeKinds": if preset_type == "workflow" {
-            json!(["backup", "transcode", "mix", "check", "filter", "long_edge", "frame_rate", "list_index", "reverse_index", "count", "math", "compare", "boolean", "gate", "output"])
+            json!(["backup", "transcode", "mix", "check", "filter", "long_edge", "frame_rate", "list_index", "reverse_index", "count", "math", "compare", "boolean", "gate", "output", "material", "script", "outputOverride"])
         } else {
             json!([])
         },
         "workflowNodeFields": if preset_type == "workflow" {
-            json!(["presetId", "presetRevision", "filter.mediaKind", "filter.nameIncludes", "metric", "logic.value", "logic.mathOperator", "logic.compareOperator", "logic.booleanOperator", "output.mode", "output.directory", "output.writeLog", "position.x", "position.y"])
+            json!(["presetId", "presetRevision", "filter.mediaKind", "filter.nameIncludes", "metric", "logic.value", "logic.mathOperator", "logic.compareOperator", "logic.booleanOperator", "output.mode", "output.directory", "output.writeLog", "position.x", "position.y", "path", "script", "override.location", "override.naming", "override.directory", "override.subdirectory", "override.nameTemplate"])
         } else {
             json!([])
         },
+        "scriptContract": if preset_type == "workflow" { json!({
+            "language": "JavaScript function body", "timeoutMs": 3000, "maxInputs": 32,
+            "input": "inputs: Array<{name,index,width,height,fps,duration}>; connection insertion order, then material list order",
+            "return": { "filterComplex": "FFmpeg preprocessing filter graph ending in [out]", "duration": "0.1..86400 seconds" },
+            "writeTool": "workflow script-set <workflow-id> <node-id> --file <utf8.js> --revision <n>",
+            "validateTool": "workflow validate <workflow-id>",
+            "ports": { "material": { "outputs": ["media"] }, "script": { "inputs": ["media"], "outputs": ["media", "error"] } },
+            "restrictions": "Preprocessing only: no format, codec, bitrate, preset or output path in script results. No app IPC, network, shell or filesystem access. Connect media to a transcode node selecting an encode preset, then output. Filters and encoding run together; no intermediate file. Audio follows encode preset, sourced from the first input. Encode before another script or media probe."
+        }) } else { Value::Null },
+        "outputOverrideContract": if preset_type == "workflow" { json!({
+            "location": "inherit | source | subdir | fixed", "naming": "inherit | default | template",
+            "fields": ["directory", "subdirectory", "nameTemplate"],
+            "usage": "Place before encoding or mixing. Overrides follow each media branch; later explicit values win. Does not mutate presets or relocate files already produced. Conflicting settings on composition inputs must be unified before composition."
+        }) } else { Value::Null },
         "workflowEdgeFields": if preset_type == "workflow" {
             json!(["source", "sourcePort", "target", "targetPort"])
         } else {

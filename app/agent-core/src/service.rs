@@ -480,6 +480,12 @@ fn dispatch(
             Ok(DispatchOutcome::Read(json!(events)))
         }
         AgentCommand::SchemaList => Ok(DispatchOutcome::Read(agent_schema::schema_list())),
+        AgentCommand::WorkflowValidate { workflow_id } => {
+            let (kind, preset) = find_preset(state, workflow_id)?;
+            if kind != "workflow" { return Err(ServiceFailure::validation("目标预设不是流程")); }
+            validate_workflow_graph_structure(&preset.params, true)?;
+            Ok(DispatchOutcome::Read(json!({ "valid": true, "revision": preset.revision, "scope": "graph", "scriptExecutionChecked": false })))
+        }
         AgentCommand::SchemaShow { function } => agent_schema::schema_show(function)
             .map(DispatchOutcome::Read)
             .ok_or_else(|| {
@@ -1511,9 +1517,6 @@ fn workflow_node_remove(
     node_id: &str,
 ) -> Result<DispatchOutcome, ServiceFailure> {
     ensure_actor(request, &[Actor::Agent])?;
-    if node_id == WORKFLOW_START_ID {
-        return Err(ServiceFailure::validation("输入节点不能删除"));
-    }
     mutate_workflow(
         state,
         request,
@@ -1521,6 +1524,12 @@ fn workflow_node_remove(
         "workflow.node_remove",
         |params| {
             let graph = workflow_graph_mut(params)?;
+            if node_id == WORKFLOW_START_ID {
+                graph.insert("startEnabled".into(), json!(false));
+                graph.get_mut("edges").and_then(Value::as_array_mut).ok_or_else(|| ServiceFailure::validation("流程连线结构无效"))?
+                    .retain(|edge| edge.get("source").and_then(Value::as_str) != Some(WORKFLOW_START_ID));
+                return Ok((format!("workflow/{workflow_id}/node/{node_id}"), "移除默认输入节点".into(), json!({ "removedNodeId": node_id })));
+            }
             let nodes = graph
                 .get_mut("nodes")
                 .and_then(Value::as_array_mut)
@@ -1657,6 +1666,9 @@ fn create_workflow_graph_node(id: &str, kind: &str, index: usize) -> Result<Valu
         "y": 80 + (index / 3) * 180
     });
     let node = match kind {
+        "material" => json!({ "id": id, "type": "material", "path": "", "position": position }),
+        "script" => json!({ "id": id, "type": "script", "script": "", "position": position }),
+        "outputOverride" => json!({ "id": id, "type": "outputOverride", "override": { "location": "inherit", "naming": "inherit", "directory": "", "subdirectory": "ShadowEncoder", "nameTemplate": "{name}{suffix}" }, "position": position }),
         "backup" | "transcode" | "mix" | "check" => json!({
             "id": id, "type": "action", "kind": kind,
             "presetId": "", "presetRevision": 1, "position": position
@@ -1762,6 +1774,11 @@ fn set_workflow_start_position(
     field: &str,
     value: Value,
 ) -> Result<(), ServiceFailure> {
+    if field == "enabled" {
+        if !value.is_boolean() { return Err(ServiceFailure::validation("enabled 必须是布尔值")); }
+        workflow_graph_mut(params)?.insert("startEnabled".into(), value);
+        return Ok(());
+    }
     let coordinate = field
         .strip_prefix("position.")
         .filter(|coordinate| matches!(*coordinate, "x" | "y"))
@@ -1797,6 +1814,25 @@ fn validate_and_set_workflow_graph_node_field(
         return Ok(());
     }
     match (node_type, field) {
+        ("outputOverride", "override.location") => {
+            if !matches!(value.as_str(), Some("inherit" | "source" | "subdir" | "fixed")) { return Err(ServiceFailure::validation("未知输出覆盖位置")); }
+            workflow_nested_field(node, "override", "location", value)?;
+        }
+        ("outputOverride", "override.naming") => {
+            if !matches!(value.as_str(), Some("inherit" | "default" | "template")) { return Err(ServiceFailure::validation("未知命名覆盖方式")); }
+            workflow_nested_field(node, "override", "naming", value)?;
+        }
+        ("outputOverride", "override.directory" | "override.subdirectory" | "override.nameTemplate") => {
+            if value.as_str().is_none_or(|text| text.len() > 4096 || text.contains('\0')) { return Err(ServiceFailure::validation("输出覆盖字段无效")); }
+            workflow_nested_field(node, "override", field.trim_start_matches("override."), value)?;
+        }
+        ("script", "script") | ("material", "path") => {
+            let limit = if field == "script" { 262144 } else { 4096 };
+            if value.as_str().is_none_or(|text| text.len() > limit || text.contains('\0')) {
+                return Err(ServiceFailure::validation("脚本或素材路径无效"));
+            }
+            node.insert(field.into(), value);
+        }
         ("action", "presetId") => {
             let value_text = value
                 .as_str()
@@ -1952,6 +1988,9 @@ fn workflow_node_ports(
 > {
     let media_in = vec![("media", "media", true)];
     match node.get("type").and_then(Value::as_str) {
+        Some("material") => Ok((vec![], vec![("media", "media", false)])),
+        Some("script") => Ok((media_in, vec![("media", "media", false), ("error", "error", false)])),
+        Some("outputOverride") => Ok((media_in, vec![("media", "media", false)])),
         Some("action") => {
             if !matches!(
                 node.get("kind").and_then(Value::as_str),
@@ -2079,6 +2118,9 @@ fn validate_workflow_connection(
     target: &str,
     target_port: &str,
 ) -> Result<(), ServiceFailure> {
+    if source == WORKFLOW_START_ID && params.pointer("/graph/startEnabled").and_then(Value::as_bool) == Some(false) {
+        return Err(ServiceFailure::validation("输入节点已删除"));
+    }
     if source == target {
         return Err(ServiceFailure::validation("流程节点不能连接到自己"));
     }
@@ -2165,10 +2207,54 @@ fn validate_workflow_graph_structure(
         }
     }
 
-    if !require_complete || nodes.is_empty() {
+    if !require_complete {
         return Ok(());
     }
-    let mut reachable = HashSet::from([WORKFLOW_START_ID.to_string()]);
+    if !nodes.iter().any(|node| node.get("type").and_then(Value::as_str) == Some("output")) {
+        return Err(ServiceFailure::validation("流程需要至少一个文件输出节点"));
+    }
+    let start_enabled = params.pointer("/graph/startEnabled").and_then(Value::as_bool) != Some(false);
+    if !start_enabled && edges.iter().any(|edge| edge.get("source").and_then(Value::as_str) == Some(WORKFLOW_START_ID)) {
+        return Err(ServiceFailure::validation("连线引用了已删除的输入节点"));
+    }
+    let mut reachable = HashSet::new();
+    if start_enabled { reachable.insert(WORKFLOW_START_ID.to_string()); }
+    for node in nodes {
+        let kind = node.get("type").and_then(Value::as_str).unwrap_or_default();
+        if kind == "material" {
+            if node.get("path").and_then(Value::as_str).is_none_or(|path| path.trim().is_empty()) { return Err(ServiceFailure::validation("素材节点未指定文件")); }
+            reachable.insert(node["id"].as_str().unwrap().to_string());
+        }
+        if kind == "script" && node.get("script").and_then(Value::as_str).is_none_or(|script| script.trim().is_empty() || script.chars().count() > 65536) {
+            return Err(ServiceFailure::validation("脚本为空或超过 64K 字符"));
+        }
+        if kind == "script" || kind == "outputOverride" {
+            let mut pending: Vec<&str> = edges.iter().filter(|edge| edge.get("source") == node.get("id") && edge["sourcePort"] == "media").filter_map(|edge| edge["target"].as_str()).collect();
+            let mut seen = HashSet::new();
+            while let Some(id) = pending.pop() {
+                if !seen.insert(id) { continue; }
+                let next = nodes.iter().find(|item| item["id"] == id).ok_or_else(|| ServiceFailure::validation("节点不存在"))?;
+                if next["type"] == "action" && (next["kind"] == "transcode" || (kind == "outputOverride" && next["kind"] == "mix")) { continue; }
+                if matches!(next["type"].as_str(), Some("output" | "action")) || (kind == "script" && matches!(next["type"].as_str(), Some("probe" | "script"))) {
+                    return Err(ServiceFailure::validation(if kind == "script" { "自定义预处理必须先连接编码节点，再输出或执行其他处理" } else { "输出设置覆盖请放在编码或混音节点之前" }));
+                }
+                pending.extend(edges.iter().filter(|edge| edge["source"] == id && edge["targetPort"] == "media").filter_map(|edge| edge["target"].as_str()));
+            }
+        }
+        if kind == "outputOverride" {
+            let value = &node["override"];
+            let field = match value["location"].as_str() { Some("fixed") => Some("directory"), Some("subdir") => Some("subdirectory"), _ => None };
+            if field.is_some_and(|field| value[field].as_str().is_none_or(|text| text.trim().is_empty())) { return Err(ServiceFailure::validation("输出设置覆盖节点未填写目录")); }
+            if value["naming"] == "template" && value["nameTemplate"].as_str().is_none_or(|text| text.trim().is_empty()) { return Err(ServiceFailure::validation("输出设置覆盖节点未填写命名模板")); }
+        }
+        if kind != "output" && !edges.iter().any(|edge| edge.get("source") == node.get("id")) {
+            return Err(ServiceFailure::validation("存在未连接后续节点或文件输出的节点"));
+        }
+        if kind == "output" && (matches!(node.pointer("/output/mode").and_then(Value::as_str), Some("copy" | "move")) || node.pointer("/output/writeLog").and_then(Value::as_bool) == Some(true))
+            && node.pointer("/output/directory").and_then(Value::as_str).is_none_or(|path| path.trim().is_empty()) {
+            return Err(ServiceFailure::validation("文件输出节点未选择目录"));
+        }
+    }
     loop {
         let before = reachable.len();
         for edge in edges {
@@ -2546,6 +2632,12 @@ fn validate_agent_workflow(state: &StoredState, params: &Value) -> Result<(), Se
     validate_workflow_graph_structure(params, true)?;
     let (nodes, _) = workflow_graph_parts(params)?;
     for node in nodes {
+        if node.get("type").and_then(Value::as_str) == Some("material") {
+            let path = node.get("path").and_then(Value::as_str).unwrap_or_default();
+            if !state.selected_paths.iter().chain(state.selected_source_paths.iter()).any(|selected| selected == path) {
+                return Err(ServiceFailure::validation("Agent 流程中的指定素材必须先在素材列表中勾选"));
+            }
+        }
         if node.get("type").and_then(Value::as_str) == Some("action")
             && node.get("kind").and_then(Value::as_str) == Some("backup")
         {
@@ -2589,7 +2681,7 @@ fn hash_file(path: &Path) -> Result<String, ServiceFailure> {
         )
     })?;
     let mut hasher = Md5::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer).map_err(|error| {
             ServiceFailure::new(
@@ -3116,6 +3208,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn output_hashing_fits_a_small_ui_thread_stack() {
+        let path = std::env::temp_dir().join(format!("shadowencoder-hash-{}.txt", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let input = path.clone();
+        let hash = std::thread::Builder::new().stack_size(128 * 1024)
+            .spawn(move || hash_file(&input).unwrap()).unwrap().join().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(hash, "900150983cd24fb0d6963f7d28e17f72");
+    }
+
     fn create_preset(
         service: &AgentService,
         request_id: &str,
@@ -3174,6 +3277,39 @@ mod tests {
             },
         ));
         assert_eq!(list.result.unwrap().as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn script_and_material_nodes_support_revision_undo_and_completeness_checks() {
+        let service = AgentService::open_in_memory();
+        let workflow = create_preset_of_type(&service, "create-script-workflow", "script-session", "workflow", "Script");
+        let add = service.handle(request("add-script", "script-session", Some(workflow.revision),
+            AgentCommand::WorkflowNodeAdd { workflow_id: workflow.id.clone(), kind: "script".into() }));
+        assert!(add.ok, "{:?}", add.error);
+        let node_id = add.result.as_ref().unwrap().pointer("/change/nodeId").unwrap().as_str().unwrap().to_string();
+        let revision = add.receipt.unwrap().entity_revision.unwrap();
+        let set = service.handle(request("write-script", "script-session", Some(revision),
+            AgentCommand::WorkflowNodeSet { workflow_id: workflow.id.clone(), node_id: node_id.clone(), field: "script".into(),
+                value: json!("return {filterComplex:'[0:v]null[out]',duration:1};") }));
+        assert!(set.ok, "{:?}", set.error);
+        let stale = service.handle(request("stale-script", "script-session", Some(revision),
+            AgentCommand::WorkflowNodeSet { workflow_id: workflow.id.clone(), node_id, field: "script".into(), value: json!("bad") }));
+        assert_eq!(stale.error.unwrap().code, error_code::REVISION_CONFLICT);
+        let undo = service.handle(request("undo-script", "script-session", None, AgentCommand::Undo));
+        assert!(undo.ok, "{:?}", undo.error);
+        let check = service.handle(request("validate-script", "script-session", None, AgentCommand::WorkflowValidate { workflow_id: workflow.id }));
+        assert_eq!(check.error.unwrap().code, error_code::VALIDATION_ERROR);
+        let params = json!({"graph": {"startEnabled":false,"nodes":[
+            {"id":"m","type":"material","path":"clip.mov"},
+            {"id":"s","type":"script","script":"return {};"},
+            {"id":"c","type":"action","kind":"transcode","presetId":"encode","presetRevision":1},
+            {"id":"o","type":"output","output":{"mode":"collect"}}
+        ],"edges":[
+            {"id":"e1","source":"m","sourcePort":"media","target":"s","targetPort":"media"},
+            {"id":"e2","source":"s","sourcePort":"media","target":"c","targetPort":"media"},
+            {"id":"e3","source":"c","sourcePort":"media","target":"o","targetPort":"media"}
+        ]}});
+        assert!(validate_workflow_graph_structure(&params, true).is_ok());
     }
 
     #[test]
@@ -3629,6 +3765,16 @@ mod tests {
         ));
         assert!(connected.ok, "{:?}", connected.error);
         workflow_revision = connected.receipt.unwrap().entity_revision.unwrap();
+
+        let added_output = service.handle(request("add-output", "session-a", Some(workflow_revision),
+            AgentCommand::WorkflowNodeAdd { workflow_id: workflow.id.clone(), kind: "output".into() }));
+        assert!(added_output.ok, "{:?}", added_output.error);
+        let output_id = added_output.result.as_ref().unwrap().pointer("/change/nodeId").unwrap().as_str().unwrap().to_string();
+        workflow_revision = added_output.receipt.unwrap().entity_revision.unwrap();
+        let connected_output = service.handle(request("connect-output", "session-a", Some(workflow_revision),
+            AgentCommand::WorkflowEdgeAdd { workflow_id: workflow.id.clone(), source: node_id.clone(), source_port: "media".into(), target: output_id, target_port: "media".into() }));
+        assert!(connected_output.ok, "{:?}", connected_output.error);
+        workflow_revision = connected_output.receipt.unwrap().entity_revision.unwrap();
 
         let changed_encode = service.handle(request(
             "update-workflow-encode",
