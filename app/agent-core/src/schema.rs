@@ -592,13 +592,15 @@ pub fn schema_show(preset_type: &str) -> Option<Value> {
             json!([])
         },
         "workflowNodeFields": if preset_type == "workflow" {
-            json!(["presetId", "presetRevision", "filter.mediaKind", "filter.nameIncludes", "metric", "logic.value", "logic.mathOperator", "logic.compareOperator", "logic.booleanOperator", "output.mode", "output.directory", "output.writeLog", "position.x", "position.y", "path", "script", "override.location", "override.naming", "override.directory", "override.subdirectory", "override.nameTemplate"])
+            json!(["presetId", "presetRevision", "filter.mediaKind", "filter.nameIncludes", "metric", "logic.value", "logic.mathOperator", "logic.compareOperator", "logic.booleanOperator", "output.mode", "output.directory", "output.writeLog", "position.x", "position.y", "path", "script", "inputMode", "override.location", "override.naming", "override.directory", "override.subdirectory", "override.nameTemplate"])
         } else {
             json!([])
         },
         "scriptContract": if preset_type == "workflow" { json!({
             "language": "JavaScript function body", "timeoutMs": 3000, "maxInputs": 32,
             "input": "inputs: Array<{name,index,width,height,fps,duration}>; connection insertion order, then material list order",
+            "inputMode": { "merge": "default; one filter graph over all connected inputs, output replaces the batch", "separate": "run the whole downstream graph once per input; conflicting inputs must be unified before composition" },
+            "unusedInputs": "merge mode warns about connected inputs the filter graph never references; the run still succeeds",
             "return": { "filterComplex": "FFmpeg preprocessing filter graph ending in [out]", "duration": "0.1..86400 seconds" },
             "writeTool": "workflow script-set <workflow-id> <node-id> --file <utf8.js> --revision <n>",
             "validateTool": "workflow validate <workflow-id>",

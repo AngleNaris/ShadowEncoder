@@ -63,6 +63,7 @@ import {
   type WorkflowGraphNode,
   type WorkflowGraphPort,
   type WorkflowGraphProbeMetric,
+  type WorkflowGraphScriptNode,
 } from '../lib/workflowGraph';
 
 type WorkflowPresetSets = Record<WorkflowActionKind, Preset[]>;
@@ -167,17 +168,19 @@ function PortHandle({ nodeId, port, kind, activeConnection, isValidConnection }:
   );
 }
 
-function ScriptEditor({ script, disabled, onChange }: { script: string; disabled: boolean; onChange: (script: string) => void }) {
+function ScriptEditor({ node, disabled, onChange }: { node: WorkflowGraphScriptNode; disabled: boolean; onChange: (node: WorkflowGraphScriptNode) => void }) {
   const [checking, setChecking] = useState(false);
   const [message, setMessage] = useState('');
   const cancelled = useRef(false);
   useEffect(() => { cancelled.current = false; return () => { cancelled.current = true; }; }, []);
-  useEffect(() => { setMessage(''); }, [script]);
+  useEffect(() => { setMessage(''); }, [node.script]);
   return <div className="se-workflow-node-editor nodrag nopan nowheel" onPointerDown={(event) => event.stopPropagation()}>
-    <label className="se-workflow-node-field"><span>素材预处理脚本</span><textarea className="se-drop-input se-workflow-script-editor" aria-label="高级自定义脚本" value={script} maxLength={65536} spellCheck={false} disabled={disabled || checking} onChange={(event) => onChange(event.target.value)} /></label>
+    <label className="se-workflow-node-field"><span>素材预处理脚本</span><textarea className="se-drop-input se-workflow-script-editor" aria-label="高级自定义脚本" value={node.script} maxLength={65536} spellCheck={false} disabled={disabled || checking} onChange={(event) => onChange({ ...node, script: event.target.value })} /></label>
+    <label className="se-workflow-node-field"><span>输入处理</span><ui.ComboBox value={node.inputMode} options={[{ label: '合并输入', value: 'merge' }, { label: '分别处理', value: 'separate' }]} onChange={inputMode => onChange({ ...node, inputMode: inputMode === 'separate' ? 'separate' : 'merge' })} disabled={disabled} /></label>
+    <div className="se-workflow-node-note">{node.inputMode === 'merge' ? '合并输入：整批素材按连线顺序交给脚本一次处理；脚本未引用的输入会在运行日志中逐个点名。' : '分别处理：每个素材单独执行一次脚本，各自生成一份预处理素材并分别编码输出。'}</div>
     <ui.Button disabled={disabled || checking} onClick={async () => {
       setChecking(true); setMessage('');
-      try { await evaluateWorkflowScript(script, [], () => cancelled.current, true); if (!cancelled.current) setMessage('语法有效'); }
+      try { await evaluateWorkflowScript(node.script, [], () => cancelled.current, true); if (!cancelled.current) setMessage('语法有效'); }
       catch (error) { if (!cancelled.current) setMessage(String((error as Error).message || error)); }
       finally { if (!cancelled.current) setChecking(false); }
     }}>{checking ? '校验中' : '校验语法'}</ui.Button>
@@ -194,7 +197,7 @@ function WorkflowNodeEditor({ node, presets, removableTrigger, disabled, onChang
 }) {
   const stopDrag = (event: React.PointerEvent) => event.stopPropagation();
   if (node.type === 'material') return <div className="se-workflow-node-editor nodrag nopan" onPointerDown={stopDrag}><label className="se-workflow-node-field"><span>素材路径</span><ui.DropInput value={node.path} onChange={(path) => onChange({ ...node, path })} disabled={disabled} /></label></div>;
-  if (node.type === 'script') return <ScriptEditor script={node.script} disabled={disabled} onChange={(script) => onChange({ ...node, script })} />;
+  if (node.type === 'script') return <ScriptEditor node={node} disabled={disabled} onChange={onChange} />;
   if (node.type === 'outputOverride') {
     const value = node.override;
     const update = (patch: Partial<typeof value>) => onChange({ ...node, override: { ...value, ...patch } });

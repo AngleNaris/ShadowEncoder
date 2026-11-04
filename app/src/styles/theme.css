@@ -287,27 +287,28 @@ button.se-btn-span2 { grid-column: span 2; }
 .se-check-box::after {
   content: '';
   position: absolute;
-  left: 4px;
-  top: 1px;
+  left: 50%;
+  top: 50%;
   width: 4px;
   height: 8px;
   border-right: 2px solid var(--primary-indicator);
   border-bottom: 2px solid var(--primary-indicator);
-  transform: rotate(45deg) scale(0);
+  /* 勾形自身不对称，先按几何中心对齐再旋转 45°，避免看起来偏左上。 */
+  transform: translate(-50%, -50%) rotate(45deg) scale(0);
   transform-origin: center;
   transition: transform 120ms cubic-bezier(0.2, 0.7, 0.3, 1.4);
 }
 .se-check.is-checked .se-check-box { background: var(--primary); border-color: var(--primary); }
-.se-check.is-checked .se-check-box::after { transform: rotate(45deg) scale(1); }
+.se-check.is-checked .se-check-box::after { transform: translate(-50%, -50%) rotate(45deg) scale(1); }
 .se-check.is-indeterminate .se-check-box { background: var(--primary); border-color: var(--primary); }
 .se-check.is-indeterminate .se-check-box::after {
-  left: 2px;
-  top: 5px;
+  left: 50%;
+  top: 50%;
   width: 8px;
   height: 0;
   border: 0;
-  border-top: 2px solid #fff;
-  transform: none;
+  border-top: 2px solid var(--primary-indicator);
+  transform: translate(-50%, -50%);
 }
 /* 单选：内部方块弹入（保持直角语言） */
 .se-radio-box::after {
@@ -1744,6 +1745,76 @@ button.se-result-view-tab:hover:not(:disabled) {
 .se-shared-files .se-filelist { flex: 1 1 auto; min-height: 120px; max-height: none; }
 .se-file-stats { margin-top: 0; font-variant-numeric: tabular-nums; }
 
+/* 素材分组：组行与成员行直接排在素材列表里，拖拽调整组顺序与素材顺序 */
+.se-filelist li.se-group-row {
+  height: 32px;
+  gap: 6px;
+  padding: 0 8px 0 6px;
+  background: var(--surface-2);
+  border-left: 2px solid var(--primary-line);
+  font-weight: 600;
+}
+.se-filelist li.se-group-row:hover { background: var(--surface-3); border-left-color: var(--primary); }
+.se-filelist li.se-group-row.is-partial { border-left-color: var(--ctrl-border-hover); }
+.se-filelist li.se-group-row.is-unchecked { border-left-color: var(--border); }
+.se-group-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+.se-filelist li.se-group-row.is-checked .se-group-name { color: var(--primary-bright); }
+.se-filelist li.se-group-row.is-partial .se-group-name { color: var(--text); }
+.se-group-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+.se-filelist li.se-group-row.is-checked .se-group-count { color: var(--primary-bright); }
+.se-group-rename {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--primary-line);
+}
+.se-filelist li.is-group-member { background: var(--primary-softer); }
+.se-filelist li.is-group-member:hover { background: var(--surface-3); }
+.se-filelist li.se-filelist-section {
+  height: 22px;
+  align-items: center;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  background: transparent;
+  border-left: 2px solid transparent;
+  cursor: default;
+}
+.se-filelist li.se-filelist-section:hover { background: transparent; box-shadow: none; color: var(--text-faint); }
+/* 拖动排序：整行在列表内实时换位，拖动中的行保持可见但让位给其它行 */
+.se-filelist li { user-select: none; }
+.se-filelist li.is-dragging {
+  background: var(--primary-soft);
+  border-left-color: var(--primary);
+  color: var(--text);
+  cursor: grabbing;
+}
+.se-filelist li.is-dragging .se-filelist-name { color: var(--primary-bright); }
+.se-shared-files .se-count-chip { cursor: default; }
+/* 新控件不产生外框焦点，仅用颜色变化提示（保留键盘可见焦点） */
+.se-filelist li .se-check-input:focus-visible + .se-check-box { outline: none; border-color: var(--primary); }
+.se-group-rename:focus-visible { outline: none; border-color: var(--primary); }
+
 /* 预设面板（轨道侧栏）：与素材列表同款（无边框扁平面板 + 统一内边距） */
 .se-preset-panel {
   display: flex;
@@ -2495,7 +2566,9 @@ html.se-modal-layer-pending .se-dialog-backdrop {
   padding: 0 10px 0 38px;
   color: var(--text-faint);
   background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid transparent;
+  border-bottom-color: var(--border);
+  box-sizing: border-box;
   font-size: 10px;
   flex: none;
 }
@@ -2557,6 +2630,7 @@ html.se-modal-layer-pending .se-dialog-backdrop {
   cursor: default;
   outline: none;
 }
+.se-media-picker-list-head > .se-check,
 .se-media-picker-entry > .se-check {
   position: absolute;
   left: 11px;
@@ -3427,3 +3501,13 @@ html.se-modal-layer-pending .se-dialog-backdrop {
   .se-filelist-name.is-overflowing .se-filelist-name-text { animation: none !important; }
 }
 .se-splitter { display: contents; }
+
+/* 选取素材：表头全选与框选 */
+.se-media-picker-list { position: relative; user-select: none; }
+.se-media-marquee {
+  position: absolute;
+  z-index: 2;
+  border: 1px solid var(--primary-line);
+  background: var(--primary-softer);
+  pointer-events: none;
+}

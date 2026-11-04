@@ -1,19 +1,21 @@
 // ShadowEncoder 复刻组件库 —— 1:1 对应原 PySide6 组件
 // 配色 / 无圆角 / 过渡 全部沿用 theme.css 的设计 token
-import React, { ReactNode, useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { createPortal } from 'react-dom';
+import React, { ReactNode, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
+import { createPortal, flushSync } from 'react-dom';
 import FormControl from '@mui/material/FormControl';
 import Select from '@mui/material/Select';
 import MenuItem from '@mui/material/MenuItem';
 import ListSubheader from '@mui/material/ListSubheader';
 import {
-  IconCaretDown, IconCaretUp, IconClose, IconFile, IconFolder,
+  IconCaretDown, IconCaretUp, IconClose, IconDeselect, IconFile, IconFolder, IconList,
   IconPlus, IconSelectAll, IconTerminal, IconTrash, IconVideo,
 } from './icons';
 import type { TaskLogEvent, TaskLogTone } from '../lib/ffmpeg';
 import { isTauriRuntime, probePath } from '../lib/ffmpeg';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { FileListItem } from '../lib/fileListContext';
+import { filePathKey } from '../lib/fileTree';
+import type { GroupSelectionState } from '../lib/taskBatches';
 import { isMediaPath } from '../lib/mediaExtensions';
 import { startMaterialDrag } from '../lib/materialDrag';
 
@@ -1339,8 +1341,22 @@ function animateFileListRowsOut(rows: HTMLLIElement[], onComplete: () => void) {
   void Promise.allSettled(animations.map((animation) => animation.finished)).then(onComplete);
 }
 
+
+type RowDrag = {
+  kind: 'group' | 'member' | 'root' | 'sibling';
+  key: string;
+  path: string;
+  label: string;
+  groupId?: string;
+  groupLabel?: string;
+  parentPath?: string;
+  isDirectory: boolean;
+};
+
 export function FileList({
   items = [],
+  groups = [],
+  hasSelection = false,
   activePath,
   onDrop,
   onToggleSelect,
@@ -1349,9 +1365,21 @@ export function FileList({
   onOpen,
   onRemove,
   acceptsFile,
+  onCreateGroup,
+  onRenameGroup,
+  onRemoveGroup,
+  onRemoveSelectionFromGroup,
+  onToggleGroupChecked,
+  onRemoveGroupMember,
+  onReorderRoots,
+  onReorderSiblings,
+  onReorderGroups,
+  onReorderGroupMember,
   disabled = false,
 }: {
   items?: FileListItem[];
+  groups?: GroupSelectionState[];
+  hasSelection?: boolean;
   activePath?: string | null;
   onDrop: (p: string[]) => void;
   onToggleSelect: (p: string) => void;
@@ -1360,10 +1388,26 @@ export function FileList({
   onOpen?: (p: string) => void;
   onRemove?: (p: string) => void;
   acceptsFile?: (path: string) => boolean;
+  onCreateGroup?: () => void;
+  onRenameGroup?: (id: string, label: string) => void;
+  onRemoveGroup?: (id: string) => void;
+  onRemoveSelectionFromGroup?: (id: string) => void;
+  onToggleGroupChecked?: (id: string) => void;
+  onRemoveGroupMember?: (groupId: string, path: string) => void;
+  onReorderRoots?: (fromPath: string, toPath: string, placeAfter: boolean) => void;
+  onReorderSiblings?: (parentPath: string, fromPath: string, toPath: string, placeAfter: boolean) => void;
+  onReorderGroups?: (fromId: string, toId: string, placeAfter: boolean) => void;
+  onReorderGroupMember?: (groupId: string, fromPath: string, toPath: string, placeAfter: boolean) => void;
   disabled?: boolean;
 }) {
   const [drag, setDrag] = useState(false);
-  const [contextItem, setContextItem] = useState<{ item: FileListItem; x: number; y: number } | null>(null);
+  const [contextItem, setContextItem] = useState<{
+    item: FileListItem;
+    x: number;
+    y: number;
+    groupId?: string;
+    groupLabel?: string;
+  } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const cancelMaterialDrag = useRef<(() => void) | undefined>(undefined);
   useEffect(() => () => cancelMaterialDrag.current?.(), [disabled]);
@@ -1414,6 +1458,366 @@ export function FileList({
     };
   }, [disabled, onDrop]);
 
+  const [contextGroup, setContextGroup] = useState<{ group: GroupSelectionState; x: number; y: number } | null>(null);
+  const [renamingGroup, setRenamingGroup] = useState<{ id: string; draft: string } | null>(null);
+  const cancelRenameRef = useRef(false);
+  const [draggingKey, setDraggingKey] = useState<string | null>(null);
+  /** 拖动中的行：直接改 transform 让它跟着指针走（不走 React 渲染，保证跟手）。 */
+  const dragVisualRef = useRef<{ row: HTMLElement; grabOffset: number; translate: number } | null>(null);
+  const gestureRef = useRef<{
+    drag: RowDrag;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    mode: 'pending' | 'reorder' | 'material' | 'ignored';
+    down: PointerEvent;
+    lastMove?: string;
+    lastCommittedY?: number;
+  } | null>(null);
+
+  const memberKeys = useMemo(
+    () => groups.flatMap((group) => group.members.map((member) => filePathKey(member.path))),
+    [groups],
+  );
+  const coveredByGroup = useCallback((path: string) => {
+    const key = filePathKey(path);
+    return memberKeys.some((memberKey) => key === memberKey || key.startsWith(`${memberKey}/`));
+  }, [memberKeys]);
+  const ungroupedItems = useMemo(
+    () => items.filter((item) => !coveredByGroup(item.path)),
+    [coveredByGroup, items],
+  );
+
+  const dragOfItem = (item: FileListItem): RowDrag => (item.depth === 0
+    ? { kind: 'root', key: item.path, path: item.path, label: item.name, isDirectory: item.isDirectory }
+    : {
+      kind: 'sibling',
+      key: item.path,
+      path: item.path,
+      label: item.name,
+      parentPath: item.parentPath ?? '',
+      isDirectory: item.isDirectory,
+    });
+
+  const beginRowDrag = (event: React.PointerEvent, drag: RowDrag) => {
+    if (disabled || event.button !== 0 || !event.isPrimary) return;
+    if ((event.target as HTMLElement).closest('button, input, label')) return;
+    // 拖动时不要选中行内文件名文本。
+    event.preventDefault();
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) selection.removeAllRanges();
+    gestureRef.current = {
+      drag,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      mode: 'pending',
+      down: event.nativeEvent,
+    };
+  };
+
+  const commitRowDrag = (drag: RowDrag, targetKey: string, placeAfter: boolean) => {
+    if (drag.kind === 'group') onReorderGroups?.(drag.key, targetKey, placeAfter);
+    else if (drag.kind === 'member') onReorderGroupMember?.(drag.groupId ?? '', drag.path, targetKey, placeAfter);
+    else if (drag.kind === 'root') onReorderRoots?.(drag.path, targetKey, placeAfter);
+    else onReorderSiblings?.(drag.parentPath ?? '', drag.path, targetKey, placeAfter);
+  };
+  const commitRowDragRef = useRef(commitRowDrag);
+  commitRowDragRef.current = commitRowDrag;
+
+  /** 同一容器内的行才允许互换：组↔组、同组成员、顶层↔顶层、同目录↔同目录。 */
+  const dragContainerKey = (drag: RowDrag) => {
+    if (drag.kind === 'group') return 'groups';
+    if (drag.kind === 'member') return `members:${drag.groupId ?? ''}`;
+    if (drag.kind === 'root') return 'roots';
+    return `siblings:${drag.parentPath ?? ''}`;
+  };
+  const dragContainerKeyRef = useRef(dragContainerKey);
+  dragContainerKeyRef.current = dragContainerKey;
+
+  // 整行拖拽：列表内按 Y 轴实时换位（其它行立即让位），越过列表边界=拖素材进流程图。
+  useEffect(() => {
+    if (disabled) return undefined;
+    const rowsOf = (containerKey: string) => Array.from(
+      listRef.current?.querySelectorAll<HTMLElement>('[data-se-row]') ?? [],
+    ).filter((row) => row.dataset.seContainer === containerKey);
+    const move = (event: PointerEvent) => {
+      const state = gestureRef.current;
+      if (!state || event.pointerId !== state.pointerId) return;
+      if (state.mode === 'pending') {
+        if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < 6) return;
+        const rect = listRef.current?.getBoundingClientRect();
+        const inside = Boolean(rect)
+          && event.clientX >= rect!.left && event.clientX <= rect!.right
+          && event.clientY >= rect!.top && event.clientY <= rect!.bottom;
+        if (inside) {
+          state.mode = 'reorder';
+          setDraggingKey(state.drag.key);
+          const row = Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-se-row]') ?? [])
+            .find((item) => item.dataset.seKey === state!.drag.key);
+          // 永久摘掉在场行的入场动画：用类名开关会让所有行动画重启一次，松手时整列表重播。
+          for (const each of Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-se-row]') ?? [])) {
+            each.style.animation = 'none';
+          }
+          if (row) {
+            const rect = row.getBoundingClientRect();
+            dragVisualRef.current = { row, grabOffset: event.clientY - rect.top, translate: 0 };
+            row.style.position = 'relative';
+            row.style.zIndex = '2';
+            row.style.pointerEvents = 'none';
+            row.style.transition = 'none';
+          }
+        } else if ((state.drag.kind === 'root' || state.drag.kind === 'sibling') && !state.drag.isDirectory) {
+          state.mode = 'material';
+          cancelMaterialDrag.current?.();
+          cancelMaterialDrag.current = startMaterialDrag(state.down, state.drag.path);
+          return;
+        } else {
+          state.mode = 'ignored';
+          return;
+        }
+      }
+      if (state.mode !== 'reorder') return;
+      const visual = dragVisualRef.current;
+      const listRect = listRef.current?.getBoundingClientRect();
+      if (visual && listRect) {
+        const rect = visual.row.getBoundingClientRect();
+        // rect 含当前 translate，先还原基准位置，再按指针落点求新的位移。
+        const baseTop = rect.top - visual.translate;
+        const minTranslate = listRect.top - baseTop;
+        const maxTranslate = listRect.bottom - baseTop - rect.height;
+        const wanted = event.clientY - visual.grabOffset - baseTop;
+        visual.translate = Math.max(minTranslate, Math.min(wanted, Math.max(minTranslate, maxTranslate)));
+        visual.row.style.transform = `translateY(${visual.translate}px)`;
+      }
+      const rows = rowsOf(dragContainerKeyRef.current(state.drag));
+      const fromIndex = rows.findIndex((row) => row.dataset.seKey === state.drag.key);
+      if (fromIndex < 0) return;
+      const others = rows.filter((row) => row.dataset.seKey !== state.drag.key);
+      if (others.length === 0) return;
+      // 插入位置只看 Y：越过某行中线就排到它前面；越过最后一行就排到末尾。
+      let insertAt = others.length;
+      for (let index = 0; index < others.length; index += 1) {
+        const rect = others[index].getBoundingClientRect();
+        if (event.clientY < rect.top + rect.height / 2) {
+          insertAt = index;
+          break;
+        }
+      }
+      if (insertAt === fromIndex) return;
+      const placeAfter = insertAt >= others.length;
+      const targetKey = (placeAfter ? others[others.length - 1] : others[insertAt]).dataset.seKey ?? '';
+      if (!targetKey) return;
+      const pair = `${targetKey}|${placeAfter}`;
+      if (state.lastMove === pair) return;
+      // 每次换位后必须再移动半个行高才允许下一次：否则指针早已越过下一行中线，会连跳两行。
+      const rowHeight = visual?.row.getBoundingClientRect().height ?? 0;
+      if (state.lastCommittedY !== undefined && rowHeight > 0
+        && Math.abs(event.clientY - state.lastCommittedY) < rowHeight * 0.5) return;
+      state.lastCommittedY = event.clientY;
+      state.lastMove = pair;
+      // 换位前后都在同一帧内量测：同步刷 DOM，避免等待帧里「新位置 + 旧位移」的闪跳。
+      const beforeTop = new Map<HTMLElement, number>();
+      for (const row of rows) beforeTop.set(row, row.getBoundingClientRect().top);
+      flushSync(() => { commitRowDragRef.current(state.drag, targetKey, placeAfter); });
+      const visualRow = dragVisualRef.current;
+      const after = rowsOf(dragContainerKeyRef.current(state.drag));
+      if (visualRow) {
+        const rect = visualRow.row.getBoundingClientRect();
+        const baseTop = rect.top - visualRow.translate;
+        const prev = beforeTop.get(visualRow.row);
+        if (prev !== undefined) {
+          visualRow.translate = prev - baseTop;
+          visualRow.row.style.transform = `translateY(${visualRow.translate}px)`;
+        }
+        // 重渲染可能覆盖行内样式：这里把拖动状态整体重刷一遍，避免这一行闪回基准位置。
+        const row = visualRow.row;
+        row.style.position = 'relative';
+        row.style.zIndex = '2';
+        row.style.pointerEvents = 'none';
+        row.style.transition = 'none';
+      }
+      for (const row of after) {
+        if (visualRow && row === visualRow.row) continue;
+        const prev = beforeTop.get(row);
+        if (prev === undefined) continue;
+        const next = row.getBoundingClientRect().top;
+        const delta = prev - next;
+        // 位移≈0 的行不要动：清掉它会让仍在过渡中的行瞬间归位，表现为闪烁。
+        if (Math.abs(delta) < 0.5) continue;
+        row.style.transition = 'none';
+        row.style.transform = `translateY(${delta}px)`;
+        void row.offsetHeight;
+        row.style.transition = 'transform 170ms cubic-bezier(0.2, 0.7, 0.3, 1)';
+        row.style.transform = '';
+      }
+    };
+    const releaseRow = () => {
+      const visual = dragVisualRef.current;
+      dragVisualRef.current = null;
+      setDraggingKey(null);
+      if (!visual) return;
+      visual.row.style.transform = '';
+      visual.row.style.position = '';
+      visual.row.style.zIndex = '';
+      visual.row.style.pointerEvents = '';
+      visual.row.style.transition = '';
+    };
+    const finish = (event: PointerEvent) => {
+      const state = gestureRef.current;
+      if (!state || event.pointerId !== state.pointerId) return;
+      gestureRef.current = null;
+      releaseRow();
+    };
+    const cancel = () => {
+      gestureRef.current = null;
+      releaseRow();
+    };
+    window.addEventListener('pointermove', move, { passive: true });
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', cancel);
+    return () => {
+      releaseRow();
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', cancel);
+    };
+  }, [disabled]);
+
+  const beginRename = (group: GroupSelectionState) => {
+    if (disabled) return;
+    cancelRenameRef.current = false;
+    setRenamingGroup({ id: group.id, draft: group.label });
+  };
+  const commitRename = () => {
+    if (!renamingGroup) return;
+    if (cancelRenameRef.current) {
+      cancelRenameRef.current = false;
+      setRenamingGroup(null);
+      return;
+    }
+    const label = renamingGroup.draft.trim();
+    if (label) onRenameGroup?.(renamingGroup.id, label);
+    setRenamingGroup(null);
+  };
+
+  const rowClass = (item: FileListItem, drag: RowDrag, depth: number) => {
+    const nonMedia = !item.isDirectory && !isMediaPath(item.path);
+    const unsupported = !item.isDirectory && !!acceptsFile && !acceptsFile(item.path);
+    return `${item.isDirectory ? 'dir' : 'file'}${activePath === item.path ? ' active' : ''}${item.checked ? ' checked' : ''}${item.indeterminate ? ' partial' : ''}${item.error ? ' has-error' : ''}${nonMedia ? ' is-non-media' : ''}${unsupported ? ' is-unsupported' : ''}${drag.kind === 'member' ? ' is-group-member' : ''}${draggingKey === drag.key ? ' is-dragging' : ''}`;
+  };
+
+  const renderRow = (item: FileListItem, drag: RowDrag, depth: number) => {
+    const nonMedia = !item.isDirectory && !isMediaPath(item.path);
+    const unsupported = !item.isDirectory && !!acceptsFile && !acceptsFile(item.path);
+    return (
+      <li
+        key={drag.key}
+        role="treeitem"
+        data-se-row
+        data-se-key={drag.key}
+        data-se-container={dragContainerKey(drag)}
+        data-se-row-kind={drag.kind}
+        data-se-group-id={drag.groupId}
+        data-se-parent-key={drag.parentPath}
+        data-tree-depth={item.depth}
+        draggable={false}
+        onDragStart={(event) => event.preventDefault()}
+        onPointerDown={(event) => beginRowDrag(event, drag)}
+        aria-level={depth + 1}
+        aria-expanded={item.isDirectory ? item.expanded : undefined}
+        aria-disabled={unsupported || undefined}
+        className={rowClass(item, drag, depth)}
+        title={unsupported ? `当前功能不支持此素材\n${item.path}` : item.error ? `${item.path}\n${item.error}` : `${item.path}\n拖拽行可调整顺序`}
+        style={{ '--tree-depth': depth } as React.CSSProperties}
+        onClick={(event) => {
+          if (disabled || unsupported) return;
+          if (item.isDirectory && drag.kind !== 'member' && item.expanded) {
+            const row = event.currentTarget;
+            if (row.dataset.treeTransition === 'true') return;
+            row.dataset.treeTransition = 'true';
+            animateFileListRowsOut(fileListBranchRows(row, false), () => {
+              delete row.dataset.treeTransition;
+              onToggleExpanded(item.path);
+            });
+          } else if (item.isDirectory && drag.kind !== 'member') onToggleExpanded(item.path);
+          else onActivate?.(item.path);
+        }}
+        onDoubleClick={(event) => {
+          if (!disabled && !unsupported && !item.isDirectory && !(event.target as HTMLElement).closest('button, label')) onOpen?.(item.path);
+        }}
+        onMouseEnter={(event) => updateFileNameMarquee(event.currentTarget, true)}
+        onMouseLeave={(event) => updateFileNameMarquee(event.currentTarget, false)}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setContextItem({
+            item,
+            x: event.clientX,
+            y: event.clientY,
+            groupId: drag.groupId,
+            groupLabel: drag.groupLabel,
+          });
+        }}
+      >
+        <label
+          className={`se-check se-check-sm${item.checked ? ' is-checked' : ''}${item.indeterminate ? ' is-indeterminate' : ''}`}
+          title={item.checked ? '取消勾选' : '勾选'}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            className="se-check-input"
+            checked={item.checked}
+            aria-checked={item.indeterminate ? 'mixed' : item.checked}
+            disabled={disabled || unsupported}
+            onChange={() => onToggleSelect(item.path)}
+          />
+          <span className="se-check-box" aria-hidden />
+        </label>
+        <span className="se-filelist-type" aria-hidden>
+          {item.isDirectory ? <IconFolder size={16} /> : <IconFile size={16} />}
+        </span>
+        <span className="se-filelist-name">
+          <span className="se-filelist-name-text">{item.name}</span>
+        </span>
+        {onRemove && item.removable && (
+          <button
+            type="button"
+            className="se-filelist-remove se-icon-btn"
+            title="从列表移除"
+            disabled={disabled}
+            onClick={(event) => {
+              event.stopPropagation();
+              const row = event.currentTarget.closest<HTMLLIElement>('li[data-tree-depth]');
+              if (!row || row.dataset.seExiting === 'true') return;
+              animateFileListRowsOut(fileListBranchRows(row, true), () => onRemove(item.path));
+            }}
+          >
+            <IconClose size={15} />
+          </button>
+        )}
+      </li>
+    );
+  };
+
+  const memberItem = (member: GroupSelectionState['members'][number]): FileListItem => ({
+    path: member.path,
+    name: member.name,
+    isDirectory: member.isDirectory,
+    parentPath: null,
+    depth: 1,
+    rootPath: member.path,
+    checked: member.selected,
+    indeterminate: false,
+    expanded: false,
+    loading: false,
+    error: '',
+    removable: false,
+  });
+
   return (
     <div
       ref={listRef}
@@ -1444,93 +1848,89 @@ export function FileList({
         </div>
       )}
       <ul role="tree">
-        {items.map((item) => {
-          const active = activePath === item.path;
-          const nonMedia = !item.isDirectory && !isMediaPath(item.path);
-          const unsupported = !item.isDirectory && !!acceptsFile && !acceptsFile(item.path);
+        {groups.map((group) => {
           return (
-            <li
-              key={item.path}
-              role="treeitem"
-              draggable={false}
-              onDragStart={(event) => event.preventDefault()}
-              onPointerDown={(event) => {
-                if (disabled || item.isDirectory || event.button !== 0 || !event.isPrimary
-                  || (event.target as HTMLElement).closest('button, input, label')) return;
-                cancelMaterialDrag.current?.();
-                cancelMaterialDrag.current = startMaterialDrag(event.nativeEvent, item.path);
-              }}
-              aria-level={item.depth + 1}
-              aria-expanded={item.isDirectory ? item.expanded : undefined}
-              aria-disabled={unsupported || undefined}
-              data-tree-depth={item.depth}
-              className={`${item.isDirectory ? 'dir' : 'file'}${active ? ' active' : ''}${item.checked ? ' checked' : ''}${item.indeterminate ? ' partial' : ''}${item.error ? ' has-error' : ''}${nonMedia ? ' is-non-media' : ''}${unsupported ? ' is-unsupported' : ''}`}
-              title={unsupported ? `当前功能不支持此素材\n${item.path}` : item.error ? `${item.path}\n${item.error}` : item.path}
-              style={{ '--tree-depth': item.depth } as React.CSSProperties}
-              onClick={(event) => {
-                if (disabled || unsupported) return;
-                if (item.isDirectory && item.expanded) {
-                  const row = event.currentTarget;
-                  if (row.dataset.treeTransition === 'true') return;
-                  row.dataset.treeTransition = 'true';
-                  animateFileListRowsOut(fileListBranchRows(row, false), () => {
-                    delete row.dataset.treeTransition;
-                    onToggleExpanded(item.path);
-                  });
-                } else if (item.isDirectory) onToggleExpanded(item.path);
-                else onActivate?.(item.path);
-              }}
-              onDoubleClick={(event) => {
-                if (!disabled && !unsupported && !item.isDirectory && !(event.target as HTMLElement).closest('button, label')) onOpen?.(item.path);
-              }}
-              onMouseEnter={(event) => updateFileNameMarquee(event.currentTarget, true)}
-              onMouseLeave={(event) => updateFileNameMarquee(event.currentTarget, false)}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                setContextItem({ item, x: event.clientX, y: event.clientY });
-              }}
-            >
-              <label
-                className={`se-check se-check-sm${item.checked ? ' is-checked' : ''}${item.indeterminate ? ' is-indeterminate' : ''}`}
-                title={item.checked ? '取消勾选' : '勾选'}
-                onClick={(event) => event.stopPropagation()}
+            <React.Fragment key={`group:${group.id}`}>
+              <li
+                data-se-row
+                data-se-key={group.id}
+                data-se-container="groups"
+                data-se-row-kind="group"
+                className={`se-group-row is-${group.state}`}
+                draggable={false}
+                onDragStart={(event) => event.preventDefault()}
+                onPointerDown={(event) => beginRowDrag(event, { kind: 'group', key: group.id, path: group.id, label: group.label, isDirectory: true })}
+                title={`${group.label}\n拖拽调整组顺序 · 双击重命名`}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextGroup({ group, x: event.clientX, y: event.clientY });
+                }}
               >
-                <input
-                  type="checkbox"
-                  className="se-check-input"
-                  checked={item.checked}
-                  aria-checked={item.indeterminate ? 'mixed' : item.checked}
-                  disabled={disabled || unsupported}
-                  onChange={() => onToggleSelect(item.path)}
-                />
-                <span className="se-check-box" aria-hidden />
-              </label>
-              <span className="se-filelist-type" aria-hidden>
-                {item.isDirectory ? <IconFolder size={16} /> : <IconFile size={16} />}
-              </span>
-              <span className="se-filelist-name">
-                <span className="se-filelist-name-text">{item.name}</span>
-              </span>
-              {onRemove && item.removable && (
-                <button
-                  type="button"
-                  className="se-filelist-remove se-icon-btn"
-                  title="从列表移除"
-                  disabled={disabled}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    const row = event.currentTarget.closest<HTMLLIElement>('li[data-tree-depth]');
-                    if (!row || row.dataset.seExiting === 'true') return;
-                    animateFileListRowsOut(fileListBranchRows(row, true), () => onRemove(item.path));
-                  }}
+                <label
+                  className={`se-check se-check-sm${group.state === 'checked' ? ' is-checked' : ''}${group.state === 'partial' ? ' is-indeterminate' : ''}`}
+                  title={group.state === 'checked' ? `取消整组勾选（${group.label}）` : `勾选整组（${group.label}）`}
                 >
-                  <IconClose size={15} />
-                </button>
-              )}
-            </li>
+                  <input
+                    type="checkbox"
+                    className="se-check-input"
+                    checked={group.state === 'checked'}
+                    aria-checked={group.state === 'partial' ? 'mixed' : group.state === 'checked'}
+                    aria-label={`勾选分组 ${group.label}`}
+                    disabled={disabled || !onToggleGroupChecked}
+                    onChange={() => onToggleGroupChecked?.(group.id)}
+                  />
+                  <span className="se-check-box" aria-hidden />
+                </label>
+                <span className="se-filelist-type" aria-hidden>
+                  <IconList size={16} />
+                </span>
+                {renamingGroup?.id === group.id ? (
+                  <input
+                    className="se-group-rename"
+                    autoFocus
+                    value={renamingGroup.draft}
+                    aria-label="分组名称"
+                    onChange={(event) => setRenamingGroup({ id: group.id, draft: event.target.value })}
+                    onBlur={commitRename}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitRename();
+                      } else if (event.key === 'Escape') {
+                        event.preventDefault();
+                        cancelRenameRef.current = true;
+                        setRenamingGroup(null);
+                      }
+                    }}
+                  />
+                ) : (
+                  <span className="se-group-name" onDoubleClick={() => beginRename(group)}>{group.label}</span>
+                )}
+                <span className="se-group-count" title={`已勾选 ${group.selectedCount} / ${group.memberCount} 项`}>
+                  {group.selectedCount}/{group.memberCount}
+                </span>
+              </li>
+              {group.members.map((member) => renderRow(
+                memberItem(member),
+                {
+                  kind: 'member',
+                  key: member.path,
+                  path: member.path,
+                  label: member.name,
+                  groupId: group.id,
+                  groupLabel: group.label,
+                  isDirectory: member.isDirectory,
+                },
+                1,
+              ))}
+            </React.Fragment>
           );
         })}
+        {groups.length > 0 && ungroupedItems.length > 0 && (
+          <li className="se-filelist-section" aria-hidden>未分组</li>
+        )}
+        {ungroupedItems.map((item) => renderRow(item, dragOfItem(item), item.depth))}
       </ul>
       <ContextMenu
         open={contextItem !== null}
@@ -1552,6 +1952,16 @@ export function FileList({
             separatorBefore: true,
             onSelect: () => onToggleSelect(contextItem.item.path),
           },
+          {
+            label: '分为一组',
+            disabled: disabled || !hasSelection || !onCreateGroup,
+            onSelect: () => onCreateGroup?.(),
+          },
+          ...(contextItem.groupId && onRemoveGroupMember ? [{
+            label: `移出分组${contextItem.groupLabel ? `「${contextItem.groupLabel}」` : ''}`,
+            disabled,
+            onSelect: () => onRemoveGroupMember(contextItem.groupId!, contextItem.item.path),
+          }] : []),
           ...(onRemove && contextItem.item.removable ? [{
             label: '从列表移除',
             danger: true,
@@ -1559,6 +1969,27 @@ export function FileList({
             disabled,
             onSelect: () => onRemove(contextItem.item.path),
           }] : []),
+        ] : []}
+      />
+      <ContextMenu
+        open={contextGroup !== null}
+        x={contextGroup?.x ?? 0}
+        y={contextGroup?.y ?? 0}
+        onClose={() => setContextGroup(null)}
+        items={contextGroup ? [
+          { label: '重命名分组', disabled, onSelect: () => beginRename(contextGroup.group) },
+          {
+            label: '移出勾选素材',
+            disabled: disabled || !hasSelection || !onRemoveSelectionFromGroup,
+            onSelect: () => onRemoveSelectionFromGroup?.(contextGroup.group.id),
+          },
+          {
+            label: '取消分组',
+            danger: true,
+            separatorBefore: true,
+            disabled: disabled || !onRemoveGroup,
+            onSelect: () => onRemoveGroup?.(contextGroup.group.id),
+          },
         ] : []}
       />
     </div>
@@ -1569,6 +2000,10 @@ export function FileList({
 export function SharedFilePanel({
   items = [],
   totalCount = 0,
+  selectedCount = 0,
+  hasSelection = false,
+  allSelected = false,
+  groups = [],
   activePath,
   onDrop,
   onToggleSelect,
@@ -1578,12 +2013,27 @@ export function SharedFilePanel({
   onRemove,
   onClear,
   onSelectAll,
+  onClearSelection,
+  onCreateGroup,
+  onRenameGroup,
+  onRemoveGroup,
+  onRemoveSelectionFromGroup,
+  onToggleGroupChecked,
+  onRemoveGroupMember,
+  onReorderRoots,
+  onReorderSiblings,
+  onReorderGroups,
+  onReorderGroupMember,
   onPick,
   acceptsFile,
   disabled,
 }: {
   items?: FileListItem[];
   totalCount?: number;
+  selectedCount?: number;
+  hasSelection?: boolean;
+  allSelected?: boolean;
+  groups?: GroupSelectionState[];
   activePath: string | null;
   onDrop: (p: string[]) => void;
   onToggleSelect: (p: string) => void;
@@ -1593,6 +2043,17 @@ export function SharedFilePanel({
   onRemove: (p: string) => void;
   onClear: () => void;
   onSelectAll: () => void;
+  onClearSelection?: () => void;
+  onCreateGroup?: () => void;
+  onRenameGroup?: (id: string, label: string) => void;
+  onRemoveGroup?: (id: string) => void;
+  onRemoveSelectionFromGroup?: (id: string) => void;
+  onToggleGroupChecked?: (id: string) => void;
+  onRemoveGroupMember?: (groupId: string, path: string) => void;
+  onReorderRoots?: (fromPath: string, toPath: string, placeAfter: boolean) => void;
+  onReorderSiblings?: (parentPath: string, fromPath: string, toPath: string, placeAfter: boolean) => void;
+  onReorderGroups?: (fromId: string, toId: string, placeAfter: boolean) => void;
+  onReorderGroupMember?: (groupId: string, fromPath: string, toPath: string, placeAfter: boolean) => void;
   onPick: () => void;
   acceptsFile?: (path: string) => boolean;
   disabled?: boolean;
@@ -1608,10 +2069,12 @@ export function SharedFilePanel({
     >
       <div className="se-panel-head">
         <span className="se-panel-title">素材列表</span>
-        <span className="se-count-chip">{totalCount}</span>
+        <span className="se-count-chip" title="已勾选 / 列表总数">{selectedCount}/{totalCount}</span>
       </div>
       <FileList
         items={items}
+        groups={groups}
+        hasSelection={hasSelection}
         activePath={activePath}
         onDrop={onDrop}
         onToggleSelect={onToggleSelect}
@@ -1620,11 +2083,28 @@ export function SharedFilePanel({
         onOpen={onOpen}
         onRemove={onRemove}
         acceptsFile={acceptsFile}
+        onCreateGroup={onCreateGroup}
+        onRenameGroup={onRenameGroup}
+        onRemoveGroup={onRemoveGroup}
+        onRemoveSelectionFromGroup={onRemoveSelectionFromGroup}
+        onToggleGroupChecked={onToggleGroupChecked}
+        onRemoveGroupMember={onRemoveGroupMember}
+        onReorderRoots={onReorderRoots}
+        onReorderSiblings={onReorderSiblings}
+        onReorderGroups={onReorderGroups}
+        onReorderGroupMember={onReorderGroupMember}
         disabled={disabled}
       />
       <div className="se-btn-grid">
         <Button disabled={disabled} onClick={onPick} icon={<IconPlus size={15} />} title="选择文件或目录" className="se-btn-span2">添加素材</Button>
-        <Button disabled={disabled || items.length === 0} onClick={onSelectAll} icon={<IconSelectAll size={15} />} title="全选">全选</Button>
+        <Button
+          disabled={disabled || items.length === 0}
+          onClick={allSelected ? onClearSelection : onSelectAll}
+          icon={allSelected ? <IconDeselect size={15} /> : <IconSelectAll size={15} />}
+          title={allSelected ? '取消全部勾选' : '全选素材'}
+        >
+          {allSelected ? '全不选' : '全选'}
+        </Button>
         <Button disabled={disabled || items.length === 0} onClick={onClear} icon={<IconTrash size={15} />} title="清除列表" className="se-btn-danger">清除列表</Button>
       </div>
       <ContextMenu
@@ -1634,7 +2114,16 @@ export function SharedFilePanel({
         onClose={() => setMenu(null)}
         items={[
           { label: '添加素材', disabled, onSelect: onPick },
-          { label: '全选素材', disabled: disabled || items.length === 0, onSelect: onSelectAll },
+          {
+            label: allSelected ? '取消全选' : '全选素材',
+            disabled: disabled || items.length === 0,
+            onSelect: allSelected ? () => onClearSelection?.() : onSelectAll,
+          },
+          {
+            label: '分为一组',
+            disabled: disabled || !hasSelection || !onCreateGroup,
+            onSelect: () => onCreateGroup?.(),
+          },
           { label: '清除列表', danger: true, separatorBefore: true, disabled: disabled || items.length === 0, onSelect: onClear },
         ]}
       />

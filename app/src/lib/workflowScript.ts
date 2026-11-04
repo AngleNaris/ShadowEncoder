@@ -74,3 +74,11 @@ export async function runWorkflowScript(script: string, assets: WorkflowAsset[],
   if (isCancelled()) throw new Error('脚本已取消');
   return { paths: assets.map((asset) => asset.path), plan };
 }
+
+// Inputs stay connected and FFmpeg still accepts them, so an unreferenced input
+// would otherwise be dropped without any signal in the run log.
+export function unusedScriptInputs(plan: ScriptPlan, inputs: Array<{ index: number; name: string }>): Array<{ index: number; name: string }> {
+  const referenced = new Set<number>();
+  for (const match of plan.filterComplex.matchAll(/\[(\d+)(?::[^[\]]*)?\]/g)) referenced.add(Number(match[1]));
+  return inputs.filter((input) => !referenced.has(input.index));
+}

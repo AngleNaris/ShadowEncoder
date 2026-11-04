@@ -35,9 +35,34 @@ function compareNodes(left: FileTreeNode, right: FileTreeNode): number {
     || left.path.localeCompare(right.path);
 }
 
+/** 手动排序：父目录 path key → 子项 path key 顺序；不在表内的子项按名称排序。 */
+export type ChildOrder = ReadonlyMap<string, readonly string[]>;
+
+function compareNodesWithOrder(order?: ChildOrder): (left: FileTreeNode, right: FileTreeNode) => number {
+  if (!order || order.size === 0) return compareNodes;
+  const indexByParent = new Map<string, Map<string, number>>();
+  return (left, right) => {
+    const parentKey = filePathKey(left.parentPath || left.rootPath);
+    let positions = indexByParent.get(parentKey);
+    if (!positions) {
+      positions = new Map<string, number>();
+      const listed = order.get(parentKey) ?? [];
+      listed.forEach((key, position) => positions!.set(key, position));
+      indexByParent.set(parentKey, positions);
+    }
+    const leftPosition = positions.get(filePathKey(left.path));
+    const rightPosition = positions.get(filePathKey(right.path));
+    if (leftPosition !== undefined && rightPosition !== undefined) return leftPosition - rightPosition;
+    if (leftPosition !== undefined) return -1;
+    if (rightPosition !== undefined) return 1;
+    return compareNodes(left, right);
+  };
+}
+
 export function buildFileTreeIndex(
   rootPaths: string[],
   trees: ReadonlyMap<string, FileTreeNode[]>,
+  order?: ChildOrder,
 ): FileTreeIndex {
   const roots: FileTreeNode[] = [];
   const nodesByKey = new Map<string, FileTreeNode>();
@@ -70,7 +95,8 @@ export function buildFileTreeIndex(
     }
   }
 
-  for (const children of childrenByKey.values()) children.sort(compareNodes);
+  const sorter = compareNodesWithOrder(order);
+  for (const children of childrenByKey.values()) children.sort(sorter);
   return { roots, nodesByKey, childrenByKey, loadedRootKeys };
 }
 

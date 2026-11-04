@@ -89,7 +89,7 @@ const AGENT_TASK_LABEL: Record<AgentTaskSnapshot['function'], string> = {
 };
 
 // Tauri 运行时会用 getVersion() 读取真实版本号；此处仅作浏览器直开 Vite 时的回退值
-const FALLBACK_APP_VERSION = "2.2.7";
+const FALLBACK_APP_VERSION = "2.2.8";
 const PROJECT_GITHUB_URL = "https://github.com/AngleNaris/shadowencoder";
 
 const THEME_ACCENT_OPTIONS = [
@@ -366,6 +366,10 @@ function SharedFilesColumn({ disabled = false, acceptsFile }: {
       <ui.SharedFilePanel
         items={fl.items}
         totalCount={fl.totalCount}
+        selectedCount={fl.selectedCount}
+        hasSelection={fl.hasSelection}
+        allSelected={fl.allSelected}
+        groups={fl.groupStates}
         activePath={fl.activePath}
         onDrop={fl.addPaths}
         onToggleSelect={fl.toggleSelect}
@@ -375,6 +379,17 @@ function SharedFilesColumn({ disabled = false, acceptsFile }: {
         onRemove={fl.removePath}
         onClear={fl.clear}
         onSelectAll={fl.selectAll}
+        onClearSelection={fl.clearSelection}
+        onCreateGroup={() => { fl.createGroup(); }}
+        onRenameGroup={fl.renameGroup}
+        onRemoveGroup={fl.removeGroup}
+        onRemoveSelectionFromGroup={fl.removeSelectionFromGroup}
+        onToggleGroupChecked={fl.toggleGroupChecked}
+        onRemoveGroupMember={fl.removeGroupMember}
+        onReorderRoots={fl.reorderRoots}
+        onReorderSiblings={fl.reorderSiblings}
+        onReorderGroups={fl.reorderGroups}
+        onReorderGroupMember={fl.reorderGroupMember}
         onPick={() => setPickerOpen(true)}
         acceptsFile={acceptsFile}
         disabled={disabled}

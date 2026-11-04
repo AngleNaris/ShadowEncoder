@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shadowencoder_agent_protocol::{
     error_code, stable_hash, Actor, AgentCommand, AgentEvent, AgentRequest, AgentResponse,
-    AgentSnapshot, MutationReceipt, OperationSnapshot, PresetSnapshot, SourceSnapshot,
-    TaskSnapshot, PROTOCOL_VERSION,
+    AgentSnapshot, MutationReceipt, OperationSnapshot, PresetSnapshot, SourceGroup,
+    SourceSnapshot, TaskInputUnit, TaskSnapshot, PROTOCOL_VERSION,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const STATE_ID: i64 = 1;
+/// 临时表里存会话态字段（素材分组）的键名。
+const SESSION_GROUPS_KEY: &str = "source_groups";
 const MAX_AGENT_OPERATIONS: i64 = 20;
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -34,6 +36,9 @@ struct StoredState {
     selected_paths: Vec<String>,
     #[serde(default)]
     selected_source_paths: Vec<String>,
+    /// 分组是会话态：不进入 state_json，单独存放在 connection 的临时表里。
+    #[serde(skip)]
+    groups: Vec<SourceGroup>,
     active_path: Option<String>,
     tasks: Vec<TaskSnapshot>,
     #[serde(default)]
@@ -54,6 +59,7 @@ impl Default for StoredState {
             sources: Vec::new(),
             selected_paths: Vec::new(),
             selected_source_paths: Vec::new(),
+            groups: Vec::new(),
             active_path: None,
             tasks: Vec::new(),
             task_output_hashes: BTreeMap::new(),
@@ -71,6 +77,7 @@ impl StoredState {
             sources: self.sources.clone(),
             selected_paths: self.selected_paths.clone(),
             selected_source_paths: self.selected_source_paths.clone(),
+            groups: self.groups.clone(),
             active_path: self.active_path.clone(),
             tasks: self.tasks.clone(),
         }
@@ -231,7 +238,11 @@ impl AgentService {
                    created_at_ms INTEGER NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS idx_agent_operations_session_sequence
-                   ON agent_operations(session_id, sequence DESC);",
+                   ON agent_operations(session_id, sequence DESC);
+                 CREATE TEMP TABLE IF NOT EXISTS agent_session_state (
+                   key TEXT PRIMARY KEY,
+                   value_json TEXT NOT NULL
+                 );",
             )
             .map_err(|error| format!("无法初始化 Agent 状态数据库: {error}"))?;
 
@@ -312,7 +323,8 @@ impl AgentService {
                 "CREATE TABLE agent_state (id INTEGER PRIMARY KEY, state_json TEXT NOT NULL);
                  CREATE TABLE agent_requests (request_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, response_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL);
                  CREATE TABLE agent_events (sequence INTEGER PRIMARY KEY, event_json TEXT NOT NULL);
-                 CREATE TABLE agent_operations (operation_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, session_id TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, summary TEXT NOT NULL, status TEXT NOT NULL, undo_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL);",
+                 CREATE TABLE agent_operations (operation_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, session_id TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, summary TEXT NOT NULL, status TEXT NOT NULL, undo_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL);
+                 CREATE TEMP TABLE agent_session_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);",
             )
             .unwrap();
         connection
@@ -432,13 +444,43 @@ fn load_state(transaction: &Transaction<'_>) -> Result<StoredState, ServiceFailu
         params![STATE_ID],
         |row| row.get(0),
     )?;
-    Ok(serde_json::from_str(&serialized)?)
+    let mut state: StoredState = serde_json::from_str(&serialized)?;
+    state.groups = load_session_groups(transaction)?;
+    Ok(state)
 }
 
 fn save_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(), ServiceFailure> {
     transaction.execute(
         "UPDATE agent_state SET state_json = ?1 WHERE id = ?2",
         params![serde_json::to_string(state)?, STATE_ID],
+    )?;
+    save_session_groups(transaction, &state.groups)?;
+    Ok(())
+}
+
+/// 分组只活在连接的临时表里：进程退出即消失，不会写进 state_json。
+fn load_session_groups(transaction: &Transaction<'_>) -> Result<Vec<SourceGroup>, ServiceFailure> {
+    let serialized: Option<String> = transaction
+        .query_row(
+            "SELECT value_json FROM agent_session_state WHERE key = ?1",
+            params![SESSION_GROUPS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match serialized {
+        Some(serialized) => Ok(serde_json::from_str(&serialized)?),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn save_session_groups(
+    transaction: &Transaction<'_>,
+    groups: &[SourceGroup],
+) -> Result<(), ServiceFailure> {
+    transaction.execute(
+        "INSERT INTO agent_session_state(key, value_json) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+        params![SESSION_GROUPS_KEY, serde_json::to_string(groups)?],
     )?;
     Ok(())
 }
@@ -542,6 +584,7 @@ fn dispatch(
             "selectedPaths": state.selected_paths,
             "selectedSourcePaths": state.selected_source_paths,
             "activePath": state.active_path,
+            "groups": state.groups,
         }))),
         AgentCommand::SourceAdd { path } => add_source(state, request, path),
         AgentCommand::SourceRemove { source_id } => remove_source(state, request, source_id),
@@ -556,6 +599,7 @@ fn dispatch(
             selected_paths,
             selected_source_paths,
             active_path,
+            groups,
         } => replace_sources(
             state,
             request,
@@ -563,6 +607,7 @@ fn dispatch(
             selected_paths,
             selected_source_paths,
             active_path.clone(),
+            groups,
         ),
         AgentCommand::WorkflowNodeAdd { workflow_id, kind } => {
             workflow_node_add(state, request, workflow_id, kind)
@@ -1296,6 +1341,7 @@ fn replace_sources(
     selected_paths: &[String],
     selected_source_paths: &[String],
     active_path: Option<String>,
+    groups: &[SourceGroup],
 ) -> Result<DispatchOutcome, ServiceFailure> {
     ensure_actor(request, &[Actor::Gui])?;
     ensure_revision(request.expected_revision, state.source_revision)?;
@@ -1390,6 +1436,7 @@ fn replace_sources(
     state.selected_paths = normalized_selected;
     state.selected_source_paths = normalized_selected_sources;
     state.active_path = active_path;
+    state.groups = normalize_source_groups(&normalized_paths, groups)?;
     state.source_revision += 1;
     Ok(DispatchOutcome::Mutation(MutationDraft {
         result: serde_json::to_value(state.snapshot())?,
@@ -1399,6 +1446,95 @@ fn replace_sources(
         entity_revision: Some(state.source_revision),
         undo: None,
     }))
+}
+
+/// 分组只作为会话态随素材列表存在：成员必须落在素材根下，组内路径不重复。
+fn normalize_source_groups(
+    roots: &[String],
+    groups: &[SourceGroup],
+) -> Result<Vec<SourceGroup>, ServiceFailure> {
+    let mut normalized: Vec<SourceGroup> = Vec::new();
+    for group in groups {
+        let id = group.id.trim();
+        if id.is_empty() {
+            return Err(ServiceFailure::validation("分组缺少 id"));
+        }
+        if normalized.iter().any(|item| item.id == id) {
+            return Err(ServiceFailure::validation(format!("分组 id 重复: {id}")));
+        }
+        let mut paths: Vec<String> = Vec::new();
+        for path in &group.paths {
+            let path = validate_source_path(path, false)?;
+            if !roots.iter().any(|root| path_belongs_to(&path, root)) {
+                return Err(ServiceFailure::validation(format!(
+                    "分组 {id} 的成员不属于素材列表: {path}"
+                )));
+            }
+            if !paths.iter().any(|item| same_path(item, &path)) {
+                paths.push(path);
+            }
+        }
+        let label = if group.label.trim().is_empty() {
+            format!("组 {}", normalized.len() + 1)
+        } else {
+            group.label.trim().to_string()
+        };
+        normalized.push(SourceGroup {
+            id: id.to_string(),
+            label,
+            paths,
+        });
+    }
+    Ok(normalized)
+}
+
+/// 每批独立跑一次整图：先按分组创建顺序，未分组素材最后合成一批。
+/// 返回空表示沿用旧的单批次行为。
+fn derive_input_units(state: &StoredState) -> Vec<TaskInputUnit> {
+    if state.groups.is_empty() {
+        return Vec::new();
+    }
+    let selected = &state.selected_source_paths;
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    let mut units: Vec<TaskInputUnit> = Vec::new();
+    let mut grouped: Vec<String> = Vec::new();
+    for group in &state.groups {
+        let mut paths: Vec<String> = Vec::new();
+        for path in selected {
+            if !group.paths.iter().any(|member| path_belongs_to(path, member)) {
+                continue;
+            }
+            if !paths.iter().any(|item| same_path(item, path)) {
+                paths.push(path.clone());
+            }
+        }
+        if paths.is_empty() {
+            continue;
+        }
+        grouped.extend(paths.iter().cloned());
+        units.push(TaskInputUnit {
+            label: group.label.clone(),
+            paths,
+        });
+    }
+    let mut remaining: Vec<String> = Vec::new();
+    for path in selected {
+        if grouped.iter().any(|item| same_path(item, path)) {
+            continue;
+        }
+        if !remaining.iter().any(|item| same_path(item, path)) {
+            remaining.push(path.clone());
+        }
+    }
+    if !remaining.is_empty() {
+        units.push(TaskInputUnit {
+            label: "未分组".into(),
+            paths: remaining,
+        });
+    }
+    units
 }
 
 fn validate_source_path(path: &str, require_exists: bool) -> Result<String, ServiceFailure> {
@@ -1830,6 +1966,12 @@ fn validate_and_set_workflow_graph_node_field(
             let limit = if field == "script" { 262144 } else { 4096 };
             if value.as_str().is_none_or(|text| text.len() > limit || text.contains('\0')) {
                 return Err(ServiceFailure::validation("脚本或素材路径无效"));
+            }
+            node.insert(field.into(), value);
+        }
+        ("script", "inputMode") => {
+            if !matches!(value.as_str(), Some("merge" | "separate")) {
+                return Err(ServiceFailure::validation("inputMode 只能是 merge 或 separate"));
             }
             node.insert(field.into(), value);
         }
@@ -2374,6 +2516,7 @@ fn start_task(
         preset_snapshots,
         scope: scope.to_string(),
         input_paths: input_paths.clone(),
+        input_units: derive_input_units(state),
         status: "requested".into(),
         progress: 0.0,
         detail: "等待 GUI 接收任务".into(),
@@ -3857,5 +4000,106 @@ mod tests {
         }));
 
         let _ = std::fs::remove_file(source_path);
+    }
+
+    #[test]
+    fn path_belongs_to_respects_separator_boundaries_and_drive_case() {
+        assert!(path_belongs_to("C:\\media\\a.mp4", "C:\\media\\a.mp4"));
+        assert!(path_belongs_to("c:\\media\\sub\\a.mp4", "C:\\media"));
+        assert!(path_belongs_to("C:\\media/a.mp4", "C:\\media"));
+        assert!(!path_belongs_to("C:\\media2\\a.mp4", "C:\\media"));
+        assert!(!path_belongs_to("D:\\media\\a.mp4", "C:\\media"));
+    }
+
+    fn selected_state(selected: &[&str], groups: Vec<SourceGroup>) -> StoredState {
+        StoredState {
+            selected_source_paths: selected.iter().map(|path| (*path).to_string()).collect(),
+            groups,
+            ..StoredState::default()
+        }
+    }
+
+    #[test]
+    fn derive_input_units_keeps_legacy_single_batch_without_groups() {
+        let state = selected_state(&["C:\\media\\a.mp4", "C:\\media\\b.mp4"], Vec::new());
+        assert!(derive_input_units(&state).is_empty());
+    }
+
+    #[test]
+    fn derive_input_units_runs_groups_in_order_and_ungrouped_last() {
+        let state = selected_state(
+            &["C:\\media\\a.mp4", "C:\\media\\b.mp4", "C:\\media\\c.mp4"],
+            vec![
+                SourceGroup {
+                    id: "group-b".into(),
+                    label: "第二轮".into(),
+                    paths: vec!["C:\\media\\b.mp4".into()],
+                },
+                SourceGroup {
+                    id: "group-a".into(),
+                    label: "第一轮".into(),
+                    paths: vec!["C:\\media\\a.mp4".into()],
+                },
+            ],
+        );
+        let units = derive_input_units(&state);
+        let labels: Vec<&str> = units.iter().map(|unit| unit.label.as_str()).collect();
+        assert_eq!(labels, vec!["第二轮", "第一轮", "未分组"]);
+        assert_eq!(units[2].paths, vec!["C:\\media\\c.mp4".to_string()]);
+    }
+
+    #[test]
+    fn derive_input_units_matches_directory_members_and_skips_unselected_groups() {
+        let state = selected_state(
+            &["C:\\media\\clips"],
+            vec![
+                SourceGroup {
+                    id: "group-clips".into(),
+                    label: "整目录".into(),
+                    paths: vec!["C:\\media\\clips".into()],
+                },
+                SourceGroup {
+                    id: "group-idle".into(),
+                    label: "空组".into(),
+                    paths: vec!["C:\\media\\other.mp4".into()],
+                },
+            ],
+        );
+        let units = derive_input_units(&state);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].label, "整目录");
+        assert_eq!(units[0].paths, vec!["C:\\media\\clips".to_string()]);
+    }
+
+    #[test]
+    fn normalize_source_groups_rejects_members_outside_the_source_list() {
+        let roots = vec!["C:\\media".to_string()];
+        let error = normalize_source_groups(
+            &roots,
+            &[SourceGroup {
+                id: "group-x".into(),
+                label: String::new(),
+                paths: vec!["D:\\elsewhere\\a.mp4".into()],
+            }],
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("不属于素材列表"));
+    }
+
+    #[test]
+    fn normalize_source_groups_dedupes_and_defaults_labels() {
+        let roots = vec!["C:\\media".to_string()];
+        let groups = normalize_source_groups(
+            &roots,
+            &[SourceGroup {
+                id: "group-a".into(),
+                label: "  ".into(),
+                paths: vec!["C:\\media\\a.mp4".into(), "c:\\media\\a.mp4".into()],
+            }],
+        )
+        .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "组 1");
+        assert_eq!(groups[0].paths, vec!["C:\\media\\a.mp4".to_string()]);
     }
 }

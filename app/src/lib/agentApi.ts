@@ -36,6 +36,17 @@ export type AgentSourceSnapshot = {
   revision: number;
 };
 
+export type AgentSourceGroup = {
+  id: string;
+  label: string;
+  paths: string[];
+};
+
+export type AgentTaskInputUnit = {
+  label: string;
+  paths: string[];
+};
+
 export type AgentTaskSnapshot = {
   id: string;
   function: 'encode' | 'mix' | 'check' | 'alpha' | 'backup' | 'workflow';
@@ -44,6 +55,7 @@ export type AgentTaskSnapshot = {
   presetSnapshots: Preset[];
   scope: 'selected';
   inputPaths: string[];
+  inputUnits: AgentTaskInputUnit[];
   status: 'requested' | 'running' | 'cancel_requested' | 'completed' | 'failed' | 'canceled' | 'undone';
   progress: number;
   detail: string;
@@ -60,6 +72,7 @@ export type AgentSnapshot = {
   sources: AgentSourceSnapshot[];
   selectedPaths: string[];
   selectedSourcePaths: string[];
+  groups: AgentSourceGroup[];
   activePath?: string;
   tasks: AgentTaskSnapshot[];
 };
@@ -140,11 +153,17 @@ export async function getAgentSnapshot(): Promise<AgentSnapshot> {
     presets: normalizePresetStore(result.presets),
     selectedPaths: result.selectedPaths ?? [],
     selectedSourcePaths: result.selectedSourcePaths ?? result.selectedPaths ?? [],
+    groups: (result.groups ?? []).map((group) => ({
+      id: group.id,
+      label: group.label ?? '',
+      paths: group.paths ?? [],
+    })),
     tasks: (result.tasks ?? []).map((task) => ({
       ...task,
       presetRevision: task.presetRevision ?? 0,
       presetSnapshots: clonePresets(task.presetSnapshots ?? []),
       inputPaths: task.inputPaths ?? [],
+      inputUnits: task.inputUnits ?? [],
     })),
   };
 }
@@ -176,6 +195,7 @@ export async function replaceAgentSources(
   selectedSourcePaths: string[],
   activePath: string | null,
   expectedRevision: number,
+  groups: AgentSourceGroup[] = [],
 ): Promise<AgentSnapshot> {
   const { result } = await agentRequest<AgentSnapshot>({
     type: 'source.gui_replace',
@@ -183,6 +203,7 @@ export async function replaceAgentSources(
     selectedPaths,
     selectedSourcePaths,
     activePath,
+    groups,
   }, expectedRevision);
   return result;
 }

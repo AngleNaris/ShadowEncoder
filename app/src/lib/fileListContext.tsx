@@ -17,7 +17,15 @@ import {
   replaceAgentSources,
   subscribeAgentStateChanged,
   type AgentSnapshot,
+  type AgentSourceGroup,
 } from './agentApi';
+import {
+  buildTaskInputUnits,
+  groupSelectionStates,
+  moveWithinList,
+  type GroupSelectionState,
+  type TaskBatchPlan,
+} from './taskBatches';
 import {
   allProcessPaths,
   buildFileTreeIndex,
@@ -44,6 +52,11 @@ export type FileListItem = FileTreeNode & {
   removable: boolean;
 };
 
+/** 会话态素材分组：每个分组是一次独立运行批次，随素材列表清空。 */
+export type FileGroup = AgentSourceGroup;
+
+export type FileGroupState = GroupSelectionState;
+
 export type FileListContextValue = {
   /** 用户显式添加的顶层文件或目录。 */
   paths: string[];
@@ -59,6 +72,14 @@ export type FileListContextValue = {
   selectedCount: number;
   hasSelection: boolean;
   activePath: string | null;
+  /** 会话态分组，按创建顺序即运行批次顺序。 */
+  groups: FileGroup[];
+  /** 各组勾选态，由成员勾选推导。 */
+  groupStates: FileGroupState[];
+  /** 已选素材按分组派生的运行批次；无分组时为空并沿用单批次运行。 */
+  taskInputPlan: TaskBatchPlan;
+  /** 当前勾选是否覆盖全部素材，用于「全选 / 全不选」开关。 */
+  allSelected: boolean;
   addPaths: (paths: string[]) => void;
   clear: () => void;
   removePath: (path: string) => void;
@@ -66,9 +87,27 @@ export type FileListContextValue = {
   toggleExpanded: (path: string) => void;
   setSelected: (paths: string[]) => void;
   selectAll: () => void;
+  toggleSelectAll: () => void;
   clearSelection: () => void;
   setActivePath: (path: string | null) => void;
   resolveLeafPaths: (paths: string[]) => Promise<string[]>;
+  createGroup: (label?: string) => string | null;
+  renameGroup: (id: string, label: string) => void;
+  removeGroup: (id: string) => void;
+  addSelectionToGroup: (id: string) => void;
+  removeSelectionFromGroup: (id: string) => void;
+  setGroupChecked: (id: string, checked: boolean) => void;
+  toggleGroupChecked: (id: string) => void;
+  /** 把某个成员移出分组（成员行右键用，不依赖当前勾选）。 */
+  removeGroupMember: (groupId: string, path: string) => void;
+  /** 顶层素材排序（同时是未分组批次与脚本输入顺序）。 */
+  reorderRoots: (fromPath: string, toPath: string, placeAfter: boolean) => void;
+  /** 目录内同层素材排序。 */
+  reorderSiblings: (parentPath: string, fromPath: string, toPath: string, placeAfter: boolean) => void;
+  /** 分组顺序（= 运行批次顺序）。 */
+  reorderGroups: (fromId: string, toId: string, placeAfter: boolean) => void;
+  /** 组内成员顺序（= 该批次内素材与脚本输入顺序）。 */
+  reorderGroupMember: (groupId: string, fromPath: string, toPath: string, placeAfter: boolean) => void;
 };
 
 const FileListContext = createContext<FileListContextValue | null>(null);
@@ -83,11 +122,56 @@ function dedupePaths(paths: string[]): string[] {
   });
 }
 
+function memberCovers(memberKey: string, pathKey: string): boolean {
+  return pathKey === memberKey || pathKey.startsWith(`${memberKey}/`);
+}
+
+function normalizeGroupMembers(paths: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const members: string[] = [];
+  for (const path of paths) {
+    if (!path) continue;
+    const key = filePathKey(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    members.push(path);
+  }
+  return members;
+}
+
+function normalizeGroups(groups: readonly FileGroup[]): FileGroup[] {
+  const result: FileGroup[] = [];
+  for (const group of groups) {
+    if (!group.id) continue;
+    const paths = normalizeGroupMembers(group.paths ?? []);
+    if (paths.length === 0) continue;
+    result.push({ id: group.id, label: group.label?.trim() || '分组', paths });
+  }
+  return result;
+}
+
+
+/** 素材来源被移除后同步清理分组：成员必须仍位于某个顶层来源之下。 */
+function pruneGroups(groups: readonly FileGroup[], rootPaths: readonly string[]): FileGroup[] {
+  if (groups.length === 0) return [];
+  const rootKeys = rootPaths.map(filePathKey);
+  const result: FileGroup[] = [];
+  for (const group of groups) {
+    const paths = group.paths.filter((member) => (
+      rootKeys.some((rootKey) => memberCovers(rootKey, filePathKey(member)))
+    ));
+    if (paths.length === 0) continue;
+    result.push({ ...group, paths });
+  }
+  return result;
+}
+
 type AgentSourceStatePayload = {
   paths: string[];
   selectedPaths: string[];
   selectedSourcePaths: string[];
   activePath: string | null;
+  groups: FileGroup[];
 };
 
 function sourceStateFromSnapshot(snapshot: AgentSnapshot): AgentSourceStatePayload {
@@ -96,6 +180,7 @@ function sourceStateFromSnapshot(snapshot: AgentSnapshot): AgentSourceStatePaylo
     selectedPaths: snapshot.selectedPaths ?? [],
     selectedSourcePaths: snapshot.selectedSourcePaths ?? snapshot.selectedPaths ?? [],
     activePath: snapshot.activePath ?? null,
+    groups: normalizeGroups(snapshot.groups ?? []),
   };
 }
 
@@ -112,8 +197,14 @@ export function FileListProvider({ children }: { children: ReactNode }) {
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(() => new Set());
   const [treeErrors, setTreeErrors] = useState<Map<string, string>>(() => new Map());
   const [activePath, setActivePath] = useState<string | null>(null);
+  const [groups, setGroups] = useState<FileGroup[]>([]);
+  /** 手动排序：父目录 key → 子项顺序（会话态，随素材列表清空）。 */
+  const [childOrder, setChildOrder] = useState<Map<string, string[]>>(() => new Map());
   const pathsRef = useRef(paths);
   const treesRef = useRef(trees);
+  const groupsRef = useRef(groups);
+  const childOrderRef = useRef(childOrder);
+  const groupSeqRef = useRef(0);
   const indexRef = useRef<FileTreeIndex>(buildFileTreeIndex([], new Map()));
   const pendingTrees = useRef<Map<string, Promise<FileTreeNode[]>>>(new Map());
   const sourceRevisionRef = useRef(0);
@@ -123,13 +214,15 @@ export function FileListProvider({ children }: { children: ReactNode }) {
   const pendingBeforeReadyRef = useRef<AgentSourceStatePayload | null>(null);
   const lastServerStateRef = useRef<AgentSourceStatePayload>({
     paths: [], selectedPaths: [], selectedSourcePaths: [], activePath: null,
+    groups: [],
   });
   const lastQueuedFingerprintRef = useRef(sourceStateFingerprint(lastServerStateRef.current));
   const skipNextSourceSyncRef = useRef(false);
   const mountedRef = useRef(true);
 
-  const index = useMemo(() => buildFileTreeIndex(paths, trees), [paths, trees]);
+  const index = useMemo(() => buildFileTreeIndex(paths, trees, childOrder), [childOrder, paths, trees]);
   indexRef.current = index;
+  childOrderRef.current = childOrder;
 
   const applySourceSnapshot = useCallback((snapshot: AgentSnapshot, expectedLocalVersion?: number) => {
     sourceRevisionRef.current = snapshot.sourceRevision;
@@ -143,7 +236,7 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     const nextTrees = new Map(
       [...treesRef.current].filter(([rootKey]) => allowedRoots.has(rootKey)),
     );
-    const nextIndex = buildFileTreeIndex(remote.paths, nextTrees);
+    const nextIndex = buildFileTreeIndex(remote.paths, nextTrees, childOrderRef.current);
     let nextSelection = new Set(remote.selectedPaths.map(filePathKey));
     for (const selectedPath of remote.selectedSourcePaths) {
       const key = filePathKey(selectedPath);
@@ -167,6 +260,11 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     setLoadingKeys((current) => new Set([...current].filter((key) => allowedRoots.has(key))));
     setTreeErrors((current) => new Map([...current].filter(([key]) => allowedRoots.has(key))));
     setActivePath(remote.activePath);
+    const nextGroups = pruneGroups(remote.groups, remote.paths);
+    // 本地裁剪出的分组与远端不一致时必须回推：否则 Agent 会一直保留已移除来源的成员。
+    skipNextSourceSyncRef.current = JSON.stringify(nextGroups) === JSON.stringify(remote.groups);
+    groupsRef.current = nextGroups;
+    setGroups(nextGroups);
   }, []);
 
   const queueSourceCommit = useCallback((intended: AgentSourceStatePayload, localVersion: number) => {
@@ -180,6 +278,7 @@ export function FileListProvider({ children }: { children: ReactNode }) {
             intended.selectedSourcePaths,
             intended.activePath,
             sourceRevisionRef.current,
+            intended.groups,
           );
         } catch (error) {
           if (!isAgentRevisionConflict(error)) throw error;
@@ -197,6 +296,7 @@ export function FileListProvider({ children }: { children: ReactNode }) {
             intended.selectedSourcePaths,
             intended.activePath,
             latest.sourceRevision,
+            intended.groups,
           );
         }
         sourceRevisionRef.current = snapshot.sourceRevision;
@@ -289,6 +389,12 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const commitGroups = useCallback((next: FileGroup[]) => {
+    const normalized = normalizeGroups(next);
+    groupsRef.current = normalized;
+    setGroups(normalized);
+  }, []);
+
   const clear = useCallback(() => {
     pathsRef.current = [];
     treesRef.current = new Map();
@@ -299,7 +405,10 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     setLoadingKeys(new Set());
     setTreeErrors(new Map());
     setActivePath(null);
-  }, []);
+    commitGroups([]);
+    childOrderRef.current = new Map();
+    setChildOrder(new Map());
+  }, [commitGroups]);
 
   const removePath = useCallback((path: string) => {
     const rootKey = filePathKey(path);
@@ -308,11 +417,10 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     );
     removedKeys.add(rootKey);
 
-    setPaths((current) => {
-      const next = current.filter((item) => filePathKey(item) !== rootKey);
-      pathsRef.current = next;
-      return next;
-    });
+    const nextPaths = pathsRef.current.filter((item) => filePathKey(item) !== rootKey);
+    pathsRef.current = nextPaths;
+    setPaths(nextPaths);
+    commitGroups(pruneGroups(groupsRef.current, nextPaths));
     setSelectedKeys((current) => {
       const next = new Set(current);
       for (const key of removedKeys) next.delete(key);
@@ -447,6 +555,170 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     () => selectedSourcePathsForTree(index, selectedKeys),
     [index, selectedKeys],
   );
+  const allSelected = useMemo(
+    () => allPaths.length > 0 && allPaths.every((path) => selectedKeys.has(filePathKey(path))),
+    [allPaths, selectedKeys],
+  );
+  const groupStates = useMemo(
+    () => groupSelectionStates(groups, selectedSourcePaths, selectedPaths).map((state) => ({
+      ...state,
+      // 目录判断用索引里的真实类型；成员可能位于未展开目录内，此时保留原名。
+      members: state.members.map((member) => {
+        const node = index.nodesByKey.get(filePathKey(member.path));
+        return node ? { ...member, isDirectory: node.isDirectory } : member;
+      }),
+    })),
+    [groups, index, selectedPaths, selectedSourcePaths],
+  );
+  const taskInputPlan = useMemo(
+    () => buildTaskInputUnits(groups, selectedSourcePaths, selectedPaths),
+    [groups, selectedPaths, selectedSourcePaths],
+  );
+
+  const toggleSelectAll = useCallback(() => {
+    if (allSelected) clearSelection();
+    else selectAll();
+  }, [allSelected, clearSelection, selectAll]);
+
+  const createGroup = useCallback((label?: string) => {
+    const members = normalizeGroupMembers(selectedSourcePaths);
+    if (members.length === 0) return null;
+    let nextNumber = 1;
+    for (const group of groupsRef.current) {
+      const match = /分组\s*(\d+)/.exec(group.label ?? '');
+      if (match) nextNumber = Math.max(nextNumber, Number(match[1]) + 1);
+    }
+    const id = `group_${Date.now().toString(36)}${(++groupSeqRef.current).toString(36)}`;
+    commitGroups([
+      ...groupsRef.current,
+      { id, label: label?.trim() || `分组 ${nextNumber}`, paths: members },
+    ]);
+    return id;
+  }, [commitGroups, selectedSourcePaths]);
+
+  const renameGroup = useCallback((id: string, label: string) => {
+    const nextLabel = label.trim();
+    if (!nextLabel) return;
+    commitGroups(groupsRef.current.map((group) => (
+      group.id === id ? { ...group, label: nextLabel } : group
+    )));
+  }, [commitGroups]);
+
+  const removeGroup = useCallback((id: string) => {
+    commitGroups(groupsRef.current.filter((group) => group.id !== id));
+  }, [commitGroups]);
+
+  /** 把当前勾选并入分组；被新条目覆盖的旧成员会被替换，避免同一批重复输入。 */
+  const addSelectionToGroup = useCallback((id: string) => {
+    const targets = normalizeGroupMembers(selectedSourcePaths);
+    if (targets.length === 0) return;
+    const targetKeys = targets.map(filePathKey);
+    commitGroups(groupsRef.current.map((group) => {
+      if (group.id !== id) return group;
+      const kept = group.paths.filter((member) => {
+        const memberKey = filePathKey(member);
+        return !targetKeys.some((targetKey) => memberCovers(targetKey, memberKey));
+      });
+      const added = targets.filter((target) => {
+        const targetKey = filePathKey(target);
+        return !kept.some((member) => memberCovers(filePathKey(member), targetKey));
+      });
+      return { ...group, paths: [...kept, ...added] };
+    }));
+  }, [commitGroups, selectedSourcePaths]);
+
+  /** 从分组移除当前勾选的成员（含被勾选目录覆盖的成员）。 */
+  const removeSelectionFromGroup = useCallback((id: string) => {
+    const selectionKeys = [...selectedSourcePaths, ...selectedPaths].map(filePathKey);
+    if (selectionKeys.length === 0) return;
+    commitGroups(groupsRef.current.map((group) => {
+      if (group.id !== id) return group;
+      return {
+        ...group,
+        paths: group.paths.filter((member) => {
+          const memberKey = filePathKey(member);
+          return !selectionKeys.some((key) => memberCovers(key, memberKey));
+        }),
+      };
+    }));
+  }, [commitGroups, selectedPaths, selectedSourcePaths]);
+
+  const setGroupChecked = useCallback((id: string, checked: boolean) => {
+    const group = groupsRef.current.find((item) => item.id === id);
+    if (!group) return;
+    setSelectedKeys((current) => {
+      const currentIndex = buildFileTreeIndex(pathsRef.current, treesRef.current);
+      let next = current;
+      for (const member of group.paths) {
+        next = setTreeSelection(next, member, currentIndex, checked);
+      }
+      return normalizeTreeSelection(next, currentIndex);
+    });
+  }, []);
+
+  const toggleGroupChecked = useCallback((id: string) => {
+    const state = groupStates.find((item) => item.id === id);
+    setGroupChecked(id, state?.state !== 'checked');
+  }, [groupStates, setGroupChecked]);
+
+  /** 成员行右键移出分组：按路径精确移除，其余成员顺序不变。 */
+  const removeGroupMember = useCallback((groupId: string, path: string) => {
+    const targetKey = filePathKey(path);
+    commitGroups(groupsRef.current.map((group) => {
+      if (group.id !== groupId) return group;
+      return {
+        ...group,
+        paths: group.paths.filter((member) => filePathKey(member) !== targetKey),
+      };
+    }));
+  }, [commitGroups]);
+
+  /** 顶层素材（来源行）排序：直接改 paths 顺序，Agent 侧同为批次顺序。 */
+  const reorderRoots = useCallback((fromPath: string, toPath: string, placeAfter: boolean) => {
+    const current = pathsRef.current;
+    const fromKey = filePathKey(fromPath);
+    const toKey = filePathKey(toPath);
+    const from = current.findIndex((path) => filePathKey(path) === fromKey);
+    const to = current.findIndex((path) => filePathKey(path) === toKey);
+    if (from < 0 || to < 0 || from === to) return;
+    const next = moveWithinList(current, from, to, placeAfter);
+    pathsRef.current = next;
+    setPaths(next);
+  }, []);
+
+  /** 目录内同层素材排序：写入手动顺序表，重建索引后显示、勾选与批次顺序一并跟随。 */
+  const reorderSiblings = useCallback((parentPath: string, fromPath: string, toPath: string, placeAfter: boolean) => {
+    const parentKey = filePathKey(parentPath);
+    const siblings = indexRef.current.childrenByKey.get(parentKey) ?? [];
+    const current = siblings.map((node) => filePathKey(node.path));
+    const from = current.indexOf(filePathKey(fromPath));
+    const to = current.indexOf(filePathKey(toPath));
+    if (from < 0 || to < 0 || from === to) return;
+    const next = new Map(childOrderRef.current);
+    next.set(parentKey, moveWithinList(current, from, to, placeAfter));
+    childOrderRef.current = next;
+    setChildOrder(next);
+  }, []);
+
+  /** 分组顺序：分组数组顺序即运行批次顺序。 */
+  const reorderGroups = useCallback((fromId: string, toId: string, placeAfter: boolean) => {
+    const current = groupsRef.current;
+    const from = current.findIndex((group) => group.id === fromId);
+    const to = current.findIndex((group) => group.id === toId);
+    if (from < 0 || to < 0 || from === to) return;
+    commitGroups(moveWithinList(current, from, to, placeAfter));
+  }, [commitGroups]);
+
+  /** 组内成员顺序：决定该批次内的素材与脚本输入顺序。 */
+  const reorderGroupMember = useCallback((groupId: string, fromPath: string, toPath: string, placeAfter: boolean) => {
+    commitGroups(groupsRef.current.map((group) => {
+      if (group.id !== groupId) return group;
+      const from = group.paths.findIndex((path) => filePathKey(path) === filePathKey(fromPath));
+      const to = group.paths.findIndex((path) => filePathKey(path) === filePathKey(toPath));
+      if (from < 0 || to < 0 || from === to) return group;
+      return { ...group, paths: moveWithinList(group.paths, from, to, placeAfter) };
+    }));
+  }, [commitGroups]);
 
   useEffect(() => {
     if (!desktopRuntime) return undefined;
@@ -480,7 +752,9 @@ export function FileListProvider({ children }: { children: ReactNode }) {
         || snapshot.selectedPaths.length > 0
         || snapshot.selectedSourcePaths.length > 0
         || snapshot.activePath) {
-        queueSourceCommit({ paths: [], selectedPaths: [], selectedSourcePaths: [], activePath: null }, localChangeVersionRef.current);
+        queueSourceCommit({
+          paths: [], selectedPaths: [], selectedSourcePaths: [], activePath: null, groups: [],
+        }, localChangeVersionRef.current);
         return;
       }
       applySourceSnapshot(snapshot);
@@ -500,6 +774,8 @@ export function FileListProvider({ children }: { children: ReactNode }) {
       selectedPaths,
       selectedSourcePaths,
       activePath,
+      // 发送前同样按素材来源裁剪，避免把已移除来源的成员推给 Agent 而被整体拒绝。
+      groups: pruneGroups(groups, paths),
     };
     const fingerprint = sourceStateFingerprint(intended);
     if (skipNextSourceSyncRef.current) {
@@ -518,6 +794,7 @@ export function FileListProvider({ children }: { children: ReactNode }) {
   }, [
     activePath,
     desktopRuntime,
+    groups,
     paths,
     queueSourceCommit,
     selectedPaths,
@@ -534,6 +811,10 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     selectedCount: selectedPaths.length,
     hasSelection: selectedKeys.size > 0,
     activePath,
+    groups,
+    groupStates,
+    taskInputPlan,
+    allSelected,
     addPaths,
     clear,
     removePath,
@@ -542,12 +823,29 @@ export function FileListProvider({ children }: { children: ReactNode }) {
     setSelected,
     selectAll,
     clearSelection,
+    toggleSelectAll,
     setActivePath,
     resolveLeafPaths,
+    createGroup,
+    renameGroup,
+    removeGroup,
+    addSelectionToGroup,
+    removeSelectionFromGroup,
+    setGroupChecked,
+    toggleGroupChecked,
+    removeGroupMember,
+    reorderRoots,
+    reorderSiblings,
+    reorderGroups,
+    reorderGroupMember,
   }), [
     paths, items, allPaths, selectedPaths, selectedSourcePaths, selectedKeys,
-    activePath, addPaths, clear, removePath, toggleSelect, toggleExpanded,
-    setSelected, selectAll, clearSelection, resolveLeafPaths,
+    activePath, groups, groupStates, taskInputPlan, allSelected,
+    addPaths, clear, removePath, toggleSelect, toggleExpanded,
+    setSelected, selectAll, clearSelection, toggleSelectAll, resolveLeafPaths,
+    createGroup, renameGroup, removeGroup, addSelectionToGroup,
+    removeSelectionFromGroup, setGroupChecked, toggleGroupChecked, removeGroupMember,
+    reorderRoots, reorderSiblings, reorderGroups, reorderGroupMember,
   ]);
 
   return <FileListContext.Provider value={value}>{children}</FileListContext.Provider>;

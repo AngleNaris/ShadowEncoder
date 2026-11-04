@@ -147,6 +147,10 @@ export function MediaPickerDialog({ open, onClose, onConfirm }: {
   const [address, setAddress] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [anchorPath, setAnchorPath] = useState('');
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const marqueeStart = useRef<{ x: number; y: number } | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const requestId = useRef(0);
   const addressRef = useRef<HTMLInputElement>(null);
 
@@ -212,6 +216,53 @@ export function MediaPickerDialog({ open, onClose, onConfirm }: {
       compareEntries(left, right, sortKey, sortDirection)
     ))
   ), [listing?.entries, sortDirection, sortKey]);
+
+  /** Shift 区间：把 anchor 到当前行之间（含）全部选中。 */
+  const selectRange = (fromPath: string, toPath: string) => {
+    const paths = sortedEntries.map((entry) => entry.path);
+    const from = paths.indexOf(fromPath);
+    const to = paths.indexOf(toPath);
+    if (from < 0 || to < 0) return;
+    const [start, end] = from <= to ? [from, to] : [to, from];
+    setSelected((current) => {
+      const next = new Map(current);
+      for (const entry of sortedEntries.slice(start, end + 1)) next.set(selectionKey(entry.path), entry);
+      return next;
+    });
+  };
+
+  const allShownSelected = sortedEntries.length > 0
+    && sortedEntries.every((entry) => selected.has(selectionKey(entry.path)));
+  const someShownSelected = sortedEntries.some((entry) => selected.has(selectionKey(entry.path)));
+  const toggleAllShown = () => {
+    setSelected((current) => {
+      const next = new Map(current);
+      for (const entry of sortedEntries) {
+        const key = selectionKey(entry.path);
+        if (allShownSelected) next.delete(key);
+        else next.set(key, entry);
+      }
+      return next;
+    });
+  };
+
+  /** 框选：用屏幕坐标求交集，落在矩形内的行全部选中。 */
+  const applyMarquee = (box: { left: number; top: number; right: number; bottom: number }) => {
+    const rows = Array.from(listRef.current?.querySelectorAll<HTMLElement>('.se-media-picker-entry') ?? []);
+    setSelected((current) => {
+      const next = new Map(current);
+      for (const row of rows) {
+        const index = Number(row.dataset.entryIndex ?? '-1');
+        const entry = sortedEntries[index];
+        if (!entry) continue;
+        const rect = row.getBoundingClientRect();
+        const hit = rect.left < box.right && rect.right > box.left
+          && rect.top < box.bottom && rect.bottom > box.top;
+        if (hit) next.set(selectionKey(entry.path), entry);
+      }
+      return next;
+    });
+  };
 
   const changeSort = (column: SortKey) => {
     if (column === sortKey) {
@@ -296,19 +347,79 @@ export function MediaPickerDialog({ open, onClose, onConfirm }: {
           <section className="se-media-picker-content" aria-busy={loading}>
             <div className="se-media-picker-list-viewport">
               <div className="se-media-picker-list-head" aria-label="排序方式">
+                <label
+                  className={`se-check se-check-sm se-media-picker-select-all${allShownSelected ? ' is-checked' : ''}${!allShownSelected && someShownSelected ? ' is-indeterminate' : ''}`}
+                  title="全选当前目录"
+                >
+                  <input
+                    type="checkbox"
+                    className="se-check-input"
+                    checked={allShownSelected}
+                    aria-checked={!allShownSelected && someShownSelected ? 'mixed' : allShownSelected}
+                    aria-label="全选当前目录"
+                    onChange={toggleAllShown}
+                  />
+                  <span className="se-check-box" aria-hidden />
+                </label>
                 <SortButton column="name" label="名称" activeColumn={sortKey} direction={sortDirection} onChange={changeSort} />
                 <SortButton column="modified" label="修改日期" activeColumn={sortKey} direction={sortDirection} onChange={changeSort} />
                 <SortButton column="size" label="大小" activeColumn={sortKey} direction={sortDirection} onChange={changeSort} />
                 <SortButton column="type" label="类型" activeColumn={sortKey} direction={sortDirection} onChange={changeSort} />
               </div>
-              <div className="se-media-picker-list" role="listbox" aria-multiselectable="true">
-                {!loading && sortedEntries.map((entry) => {
+              <div
+                ref={listRef}
+                className="se-media-picker-list"
+                role="listbox"
+                aria-multiselectable="true"
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  if ((event.target as HTMLElement).closest('.se-media-picker-entry')) return;
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  marqueeStart.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+                  setMarquee({ left: marqueeStart.current.x, top: marqueeStart.current.y, width: 0, height: 0 });
+                }}
+                onPointerMove={(event) => {
+                  const start = marqueeStart.current;
+                  if (!start) return;
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const x = event.clientX - rect.left;
+                  const y = event.clientY - rect.top;
+                  setMarquee({
+                    left: Math.min(start.x, x),
+                    top: Math.min(start.y, y),
+                    width: Math.abs(x - start.x),
+                    height: Math.abs(y - start.y),
+                  });
+                }}
+                onPointerUp={(event) => {
+                  const start = marqueeStart.current;
+                  marqueeStart.current = null;
+                  setMarquee(null);
+                  if (!start) return;
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const left = rect.left + Math.min(start.x, event.clientX - rect.left);
+                  const top = rect.top + Math.min(start.y, event.clientY - rect.top);
+                  const right = rect.left + Math.max(start.x, event.clientX - rect.left);
+                  const bottom = rect.top + Math.max(start.y, event.clientY - rect.top);
+                  if (right - left < 4 || bottom - top < 4) return;
+                  applyMarquee({ left, top, right, bottom });
+                }}
+              >
+                {marquee && (
+                  <div
+                    className="se-media-marquee"
+                    aria-hidden
+                    style={{ left: marquee.left, top: marquee.top, width: marquee.width, height: marquee.height }}
+                  />
+                )}
+                {!loading && sortedEntries.map((entry, index) => {
                   const checked = selected.has(selectionKey(entry.path));
                   const focused = focusedPath === entry.path;
                   return (
                     <div
                       className={`se-media-picker-entry${focused ? ' focused' : ''}${checked ? ' selected' : ''}`}
                       key={entry.path}
+                      data-entry-index={index}
                       role="option"
                       aria-selected={checked}
                       tabIndex={0}
@@ -316,6 +427,8 @@ export function MediaPickerDialog({ open, onClose, onConfirm }: {
                       onClick={(event) => {
                         setFocusedPath(entry.path);
                         event.currentTarget.focus();
+                        if (event.shiftKey && anchorPath) selectRange(anchorPath, entry.path);
+                        else setAnchorPath(entry.path);
                       }}
                       onFocus={() => setFocusedPath(entry.path)}
                       onDoubleClick={() => {

@@ -37,7 +37,7 @@ import {
   type PresetBuilderCtx,
 } from './presetSystem';
 import { WorkflowEditor, WorkflowPresetBuilder } from './WorkflowEditor';
-import { runWorkflowScript } from '../lib/workflowScript';
+import { runWorkflowScript, unusedScriptInputs } from '../lib/workflowScript';
 import { applyOutputOverride } from '../lib/workflowOutput';
 import {
   WORKFLOW_ACTION_LABELS,
@@ -1096,12 +1096,27 @@ async function executeWorkflowGraph(graph: WorkflowGraph, state: WorkflowExecuti
     runScript: async (node, sourceAssets) => {
       environment.startedActions += 1;
       environment.task.setDetail('高级自定义');
-      workflowLog(environment.task, '执行高级自定义脚本');
+      workflowLog(environment.task, node.inputMode === 'separate' ? '执行高级自定义脚本 · 每个素材分别处理' : '执行高级自定义脚本');
       try {
         const assets = await resolveWorkflowAssets(sourceAssets, environment);
+        if (node.inputMode === 'separate') {
+          const outputs: WorkflowAsset[] = [];
+          for (const asset of assets) {
+            const preprocessing = await runWorkflowScript(node.script, [asset], environment.task.isCancelled);
+            outputs.push({ ...asset, id: outputs.length ? `${node.id}-${outputs.length + 1}` : node.id, preprocessing });
+            state.pass += 1;
+            environment.task.setPass(state.pass);
+          }
+          if (outputs.length) workflowLog(environment.task, `分别处理 ${outputs.length} 个素材`, 'pass');
+          return { media: { type: 'media', assets: outputs } };
+        }
         const overrides = assets.map(asset => JSON.stringify(asset.outputOverride ?? null));
         if (new Set(overrides).size > 1) throw new Error('拼接素材的输出覆盖设置不一致，请在拼接后统一设置');
         const preprocessing = await runWorkflowScript(node.script, assets, environment.task.isCancelled);
+        const connected = assets.map((asset, index) => ({ index, name: asset.path.split(/[/\\]/).pop() || asset.path }));
+        for (const input of unusedScriptInputs(preprocessing.plan, connected)) {
+          workflowLog(environment.task, `脚本未引用第 ${input.index + 1} 个输入：${input.name}（已连接但不会参与处理）`, 'warn');
+        }
         state.pass += 1;
         return { media: { type: 'media', assets: [{ ...assets[0], id: node.id, preprocessing }] } };
       } catch (error) {
@@ -1120,6 +1135,58 @@ async function executeWorkflowGraph(graph: WorkflowGraph, state: WorkflowExecuti
   });
   for (const message of result.errors.values.values()) workflowLog(environment.task, message, 'warn');
   if (!state.outputPaths.length && !environment.task.isCancelled()) throw new Error([...result.errors.values.values()][0] || '流程未产生输出：请检查素材筛选、分流条件和输出连线');
+}
+
+type WorkflowBatch = { label: string; paths: string[] };
+type WorkflowBatchTotals = {
+  outputPaths: string[];
+  pass: number;
+  fail: number;
+  failedBatches: number;
+};
+
+/**
+ * 依次执行每个批次；某批失败只记一条失败并继续后续批次。
+ * 单批次时保持旧行为：异常直接抛给任务错误面板。
+ */
+async function executeWorkflowBatches(
+  graph: WorkflowGraph,
+  batches: WorkflowBatch[],
+  environment: WorkflowExecutionEnvironment,
+): Promise<WorkflowBatchTotals> {
+  const task = environment.task;
+  const outputPaths: string[] = [];
+  let pass = 0;
+  let fail = 0;
+  let failedBatches = 0;
+  for (let index = 0; index < batches.length; index += 1) {
+    if (task.isCancelled()) break;
+    const batch = batches[index];
+    if (batches.length > 1) {
+      workflowLog(task, `批次 ${index + 1}/${batches.length} · ${batch.label || '未分组'} · ${batch.paths.length} 个素材`);
+    }
+    const state: WorkflowExecutionState = {
+      paths: [...batch.paths],
+      outputPaths: [],
+      pass,
+      fail,
+    };
+    try {
+      await executeWorkflowGraph(graph, state, environment);
+    } catch (error) {
+      if (batches.length === 1) throw error;
+      state.fail += 1;
+      failedBatches += 1;
+      const reason = error instanceof Error ? error.message : String(error);
+      workflowLog(task, `批次「${batch.label || '未分组'}」失败：${reason}`, 'fail');
+    }
+    pass = state.pass;
+    fail = state.fail;
+    outputPaths.push(...state.outputPaths);
+    task.setPass(pass);
+    task.setFail(fail);
+  }
+  return { outputPaths, pass, fail, failedBatches };
 }
 
 function workflowNeedsSourceList(graph: WorkflowGraph): boolean {
@@ -1149,8 +1216,10 @@ export function DitWorkflowTab() {
     () => workflowValidationIssues(workflow, presetSets),
     [presetSets, workflow],
   );
+  const groupsNeedSelection = workflow.trigger.kind === 'manual' && fl.groups.length > 0 && !fl.hasSelection;
   const invalid = validationIssues.length > 0
-    || (workflow.trigger.kind === 'manual' && workflowNeedsSourceList(workflow.graph) && inputPaths.length === 0);
+    || (workflow.trigger.kind === 'manual' && workflowNeedsSourceList(workflow.graph) && inputPaths.length === 0)
+    || groupsNeedSelection;
 
   const run = () => task.start(async () => {
     const definition = normalizeWorkflowDefinition(workflow);
@@ -1169,20 +1238,22 @@ export function DitWorkflowTab() {
       workflowLog(task, `触发磁盘：${volume.label.trim() || '未命名卷'} (${volume.rootPath})`, 'pass');
     }
     if (sourcePaths.length === 0 && workflowNeedsSourceList(definition.graph)) throw new Error('没有可用于流程的素材');
+    if (definition.trigger.kind === 'manual' && fl.groups.length > 0 && !fl.hasSelection) {
+      throw new Error('已创建分组，但没有勾选任何分组或未分组素材');
+    }
 
+    const plan = definition.trigger.kind === 'manual' ? fl.taskInputPlan : { units: [], skippedGroups: [] };
+    for (const label of plan.skippedGroups) {
+      workflowLog(task, `分组「${label}」没有勾选素材，已跳过`, 'warn');
+    }
+    const batches = plan.units.length > 0 ? plan.units : [{ label: '', paths: sourcePaths }];
     const counts = workflowDefinitionNodeCounts(definition);
-    const state: WorkflowExecutionState = {
-      paths: sourcePaths,
-      outputPaths: [],
-      pass: 0,
-      fail: 0,
-    };
     const environment: WorkflowExecutionEnvironment = {
       task,
       presets: presetSets,
       triggerKind: definition.trigger.kind,
       agentMode: false,
-      totalActions: counts.actions,
+      totalActions: counts.actions * batches.length,
       startedActions: 0,
       completedActions: 0,
       resolveMediaPaths: definition.trigger.kind === 'manual'
@@ -1194,14 +1265,21 @@ export function DitWorkflowTab() {
           recursive: true,
         })).map((file) => file.path).sort((left, right) => left.replace(/\\/g, '/').localeCompare(right.replace(/\\/g, '/'))),
     };
-    await executeWorkflowGraph(definition.graph, state, environment);
+    const { outputPaths, pass, fail, failedBatches } = await executeWorkflowBatches(definition.graph, batches, environment);
     if (task.isCancelled()) {
       task.setOutputPaths([]);
     } else {
       task.setProgress(100);
-      task.setOutputPaths(state.outputPaths);
-      task.setDetail(`流程完成 · 执行 ${environment.completedActions} 个步骤`);
-      workflowLog(task, `流程完成 · 通过 ${state.pass}，失败 ${state.fail}`, state.fail > 0 ? 'warn' : 'pass');
+      task.setOutputPaths(outputPaths);
+      task.setDetail(batches.length > 1
+        ? `流程完成 · ${batches.length} 个批次 · 执行 ${environment.completedActions} 个步骤`
+        : `流程完成 · 执行 ${environment.completedActions} 个步骤`);
+      const batchNote = failedBatches > 0 ? `，${failedBatches} 个批次失败` : '';
+      workflowLog(
+        task,
+        `流程完成 · 通过 ${pass}，失败 ${fail}${batchNote}`,
+        fail > 0 ? 'warn' : 'pass',
+      );
     }
   });
 
@@ -1225,35 +1303,35 @@ export function DitWorkflowTab() {
     if (agentTask.inputPaths.length === 0 && workflowNeedsSourceList(definition.graph)) throw new Error('没有可用于流程的素材');
     workflowLog(task, `Agent 启动流程：${preset.name}`);
 
+    const batches = agentTask.inputUnits.length > 0
+      ? agentTask.inputUnits
+      : [{ label: '', paths: [...agentTask.inputPaths] }];
     const counts = workflowDefinitionNodeCounts(definition);
-    const state: WorkflowExecutionState = {
-      paths: [...agentTask.inputPaths],
-      outputPaths: [],
-      pass: 0,
-      fail: 0,
-    };
     const environment: WorkflowExecutionEnvironment = {
       task,
       presets: agentPresetSets,
       triggerKind: 'manual',
       agentMode: true,
-      totalActions: counts.actions,
+      totalActions: counts.actions * batches.length,
       startedActions: 0,
       completedActions: 0,
       resolveMediaPaths: fl.resolveLeafPaths,
     };
-    await executeWorkflowGraph(definition.graph, state, environment);
-    const outputPaths = task.isCancelled() ? [] : state.outputPaths;
-    task.setOutputPaths(outputPaths);
+    const { outputPaths, pass, fail, failedBatches } = await executeWorkflowBatches(definition.graph, batches, environment);
+    const finalOutputs = task.isCancelled() ? [] : outputPaths;
+    task.setOutputPaths(finalOutputs);
+    const batchNote = failedBatches > 0 ? `，${failedBatches} 个批次失败` : '';
     const detail = task.isCancelled()
       ? '流程已取消'
-      : `流程完成 · 执行 ${environment.completedActions} 个步骤`;
+      : batches.length > 1
+        ? `流程完成 · ${batches.length} 个批次 · 执行 ${environment.completedActions} 个步骤`
+        : `流程完成 · 执行 ${environment.completedActions} 个步骤`;
     if (!task.isCancelled()) {
       task.setProgress(100);
       task.setDetail(detail);
-      workflowLog(task, `流程完成 · 通过 ${state.pass}，失败 ${state.fail}`, state.fail > 0 ? 'warn' : 'pass');
+      workflowLog(task, `流程完成 · 通过 ${pass}，失败 ${fail}${batchNote}`, fail > 0 ? 'warn' : 'pass');
     }
-    return { outputPaths, detail };
+    return { outputPaths: finalOutputs, detail };
   })), [
     fl.resolveLeafPaths,
     task,
@@ -1262,9 +1340,11 @@ export function DitWorkflowTab() {
   const graphIssue = workflowGraphIssues(workflow.graph)[0];
   const workflowCanvasIssue = validationIssues[0] && validationIssues[0] !== graphIssue
     ? validationIssues[0]
-    : !validationIssues[0] && workflow.trigger.kind === 'manual' && workflowNeedsSourceList(workflow.graph) && inputPaths.length === 0
-      ? '素材列表中没有可执行的素材'
-      : undefined;
+    : !validationIssues[0] && groupsNeedSelection
+      ? '已创建分组，但没有勾选任何分组或未分组素材'
+      : !validationIssues[0] && workflow.trigger.kind === 'manual' && workflowNeedsSourceList(workflow.graph) && inputPaths.length === 0
+        ? '素材列表中没有可执行的素材'
+        : undefined;
 
   return (
     <ToolWorkspace

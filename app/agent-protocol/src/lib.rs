@@ -119,6 +119,8 @@ pub enum AgentCommand {
         selected_source_paths: Vec<String>,
         #[serde(default)]
         active_path: Option<String>,
+        #[serde(default)]
+        groups: Vec<SourceGroup>,
     },
 
     #[serde(rename = "workflow.node_add")]
@@ -204,6 +206,25 @@ pub struct SourceSnapshot {
     pub revision: i64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceGroup {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskInputUnit {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskSnapshot {
@@ -217,6 +238,9 @@ pub struct TaskSnapshot {
     pub scope: String,
     #[serde(default)]
     pub input_paths: Vec<String>,
+    /// 分组独立批次；为空表示沿用旧的单批次行为。
+    #[serde(default)]
+    pub input_units: Vec<TaskInputUnit>,
     pub status: String,
     pub progress: f64,
     pub detail: String,
@@ -263,6 +287,8 @@ pub struct AgentSnapshot {
     pub selected_paths: Vec<String>,
     #[serde(default)]
     pub selected_source_paths: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<SourceGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_path: Option<String>,
     pub tasks: Vec<TaskSnapshot>,

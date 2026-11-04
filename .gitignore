@@ -16,6 +16,7 @@ mpv/win/
 
 # temp / test
 *.log
+app/output/
 
 # IDE
 .vscode/
@@ -35,6 +36,8 @@ mpv/win/
 .playwright-cli/
 .agents/
 .github/
+.deepseek-harness/
+.zcode/
 
 # 验证用截图（非交付物）
 shadowencoder-*.png

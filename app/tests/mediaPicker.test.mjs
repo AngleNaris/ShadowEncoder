@@ -11,8 +11,6 @@ test('素材浏览器仅通过勾选改变选择，单击行只聚焦', async ()
   assert.doesNotMatch(picker, /onClick=\{\(\) => toggle\(entry\)\}/);
   assert.match(picker, /type="checkbox"[\s\S]*onChange=\{\(event\) => setEntrySelected\(entry, event\.target\.checked\)\}/);
   assert.doesNotMatch(picker, /选择当前目录|se-media-picker-selection/);
-  assert.doesNotMatch(ui, /onClearSelection|IconDeselect/);
-  assert.doesNotMatch(app, /onClearSelection=/);
 });
 
 test('素材浏览器提供卷标、修改日期和四列排序契约', async () => {
@@ -45,8 +43,8 @@ test('素材面板按钮按添加一行、全选与清除并排行布局', async
   const css = await readFile(new URL('../src/styles/theme.css', import.meta.url), 'utf8');
 
   assert.match(ui, /className="se-btn-span2">添加素材<\/Button>/);
-  assert.match(ui, /onSelectAll[\s\S]*title="全选">全选<\/Button>/);
-  assert.doesNotMatch(ui, /onSelectAll[\s\S]*className="se-btn-span2">全选<\/Button>/);
+  assert.match(ui, /allSelected \? onClearSelection : onSelectAll/);
+  assert.doesNotMatch(ui, /className="se-btn-span2">[^<]*全选/);
   assert.match(ui, /IconTrash[\s\S]*className="se-btn-danger">清除列表<\/Button>/);
   assert.match(picker, /se-media-picker-title-group[\s\S]*se-dialog-title[\s\S]*se-count-chip[\s\S]*selected\.size/);
   assert.doesNotMatch(picker, /添加 \$\{selected\.size\} 项/);
@@ -84,7 +82,7 @@ test('共享素材列表提供紧凑目录树和部分选中状态', async () =>
   assert.doesNotMatch(css, /\.se-filelist-expand(?:-spacer)?/);
   assert.match(context, /setSelectedKeys\(\(current\) => setTreeSelection\(current, path, currentIndex, shouldSelect\)\)/);
   assert.match(context, /ensureTree\(node\.rootPath\)[\s\S]*setTreeSelection\(current, path, loadedIndex, shouldSelect\)/);
-  assert.match(context, /if \(pending\) \{[\s\S]*queueSourceCommit\(pending,[\s\S]*snapshot\.sources\.length > 0[\s\S]*queueSourceCommit\(\{ paths: \[\], selectedPaths: \[\], selectedSourcePaths: \[\], activePath: null \}/);
+  assert.match(context, /if \(pending\) \{[\s\S]*queueSourceCommit\(pending,[\s\S]*snapshot\.sources\.length > 0[\s\S]*queueSourceCommit\(\{[\s\S]*paths: \[\], selectedPaths: \[\], selectedSourcePaths: \[\], activePath: null, groups: \[\]/);
   assert.match(ui, /export function FileList\(\{[\s\S]*items = \[\]/);
   assert.match(ui, /export function SharedFilePanel\(\{[\s\S]*items = \[\],[\s\S]*totalCount = 0/);
   assert.match(css, /\.se-filelist li\s*\{[^}]*height:\s*40px;/);

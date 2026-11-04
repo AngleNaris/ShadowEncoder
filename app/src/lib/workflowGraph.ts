@@ -51,8 +51,9 @@ export type WorkflowGraphOutputNode = {
 export type WorkflowGraphMaterialNode = {
   id: string; type: 'material'; path: string; position: WorkflowGraphPosition;
 };
+export type WorkflowScriptInputMode = 'merge' | 'separate';
 export type WorkflowGraphScriptNode = {
-  id: string; type: 'script'; script: string; position: WorkflowGraphPosition;
+  id: string; type: 'script'; script: string; inputMode: WorkflowScriptInputMode; position: WorkflowGraphPosition;
 };
 export type WorkflowGraphOutputOverrideNode = {
   id: string; type: 'outputOverride'; override: WorkflowOutputOverride; position: WorkflowGraphPosition;
@@ -71,7 +72,7 @@ export function createWorkflowGraphMaterial(path: string, position = { x: 0, y: 
   return { id: graphId('workflow-material'), type: 'material', path, position };
 }
 export function createWorkflowGraphScript(position = { x: 280, y: 120 }): WorkflowGraphScriptNode {
-  return { id: graphId('workflow-script'), type: 'script', script: DEFAULT_WORKFLOW_SCRIPT, position };
+  return { id: graphId('workflow-script'), type: 'script', script: DEFAULT_WORKFLOW_SCRIPT, inputMode: 'merge', position };
 }
 export type WorkflowGraphNode = WorkflowGraphActionNode
   | WorkflowGraphOutputOverrideNode
@@ -248,7 +249,7 @@ export function normalizeWorkflowGraph(value: unknown): WorkflowGraph {
     if (item.type === 'material') {
       nodes.push({ id, type: 'material', path: text(item.path), position });
     } else if (item.type === 'script') {
-      nodes.push({ id, type: 'script', script: text(item.script), position });
+      nodes.push({ id, type: 'script', script: text(item.script), inputMode: item.inputMode === 'separate' ? 'separate' : 'merge', position });
     } else if (item.type === 'outputOverride') {
       const node = createWorkflowGraphOutputOverride(position);
       const rawOverride = item.override && typeof item.override === 'object' ? item.override as Record<string, unknown> : {};
